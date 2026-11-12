@@ -1,0 +1,20 @@
+[package]
+name = "vibex-render"
+description = "Grid renderer for Vibex Terminal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vibex-term.workspace = true
+wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan", "wgsl", "std"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+rustybuzz = "0.20"
+unicode-width = "0.2"
+
+[dev-dependencies]
+vibex-vt.workspace = true
+vibex-pty.workspace = true

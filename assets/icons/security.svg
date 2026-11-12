@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <style>.accent{stroke:#38d9f5}.accent-fill{fill:#38d9f5}</style>
+  <path d="M12 3.25 L19.25 5.75 V12 L12 20.75 L4.75 12 V5.75 Z"/>
+  <path class="accent" d="M8.75 12 L11 14.25 L14.25 11"/>
+  <circle class="accent-fill" cx="15.4" cy="9.85" r="1.15" fill="currentColor" stroke="none"/>
+</svg>

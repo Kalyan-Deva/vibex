@@ -1,0 +1,10 @@
+[package]
+name = "vibex-vt"
+description = "DEC/ANSI escape sequence parser for Vibex Terminal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

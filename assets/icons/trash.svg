@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <style>.accent{stroke:#38d9f5}.accent-fill{fill:#38d9f5}</style>
+  <path d="M4 6.75 h16"/>
+  <path d="M9.25 6.75 V4.75 L10.25 3.75 H13.75 L14.75 4.75 V6.75"/>
+  <path d="M6 6.75 L7 19 L8.5 20.5 H15.5 L17 19 L18 6.75"/>
+  <path class="accent" d="M10 11 v5.5"/>
+  <path d="M14 11 v5.5"/>
+</svg>

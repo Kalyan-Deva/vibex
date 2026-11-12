@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <style>.accent{stroke:#38d9f5}.accent-fill{fill:#38d9f5}</style>
+  <path d="M5.25 4 H18.75 L20.75 6 V9 L18.75 11 H5.25 L3.25 9 V6 Z"/>
+  <path d="M5.25 13 H18.75 L20.75 15 V18 L18.75 20 H5.25 L3.25 18 V15 Z"/>
+  <circle class="accent-fill" cx="7" cy="7.5" r="1.1" fill="currentColor" stroke="none"/>
+  <circle cx="7" cy="16.5" r="1" fill="currentColor" stroke="none"/>
+  <path d="M11 7.5 h5.75"/>
+  <path d="M11 16.5 h5.75"/>
+</svg>

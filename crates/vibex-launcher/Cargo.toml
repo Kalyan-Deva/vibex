@@ -1,0 +1,14 @@
+[package]
+name = "vibex-launcher"
+description = "vibex.com: the console-side `vibex` command, so shells wait for CLI output"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "vibex-launcher"
+path = "src/main.rs"
+
+[dependencies]

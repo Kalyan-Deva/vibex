@@ -1,0 +1,15 @@
+[package]
+name = "vibex-term"
+description = "Terminal state machine (grid, scrollback, modes) for Vibex Terminal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vibex-vt.workspace = true
+unicode-width = "0.2"
+png = "0.17"
+miniz_oxide = "0.8"
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }

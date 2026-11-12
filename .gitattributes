@@ -1,0 +1,5 @@
+# bash/sh must keep LF or WSL fails on the \r
+*.bash text eol=lf
+*.sh   text eol=lf
+*.ico  binary
+*.png  binary

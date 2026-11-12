@@ -1,0 +1,21 @@
+# The editors Vibex ships (tools\fetch-bundle.ps1 downloads, checks and
+# unpacks them into vendor\tools; tools\package.ps1 puts that in the setup).
+#
+#   tool   version   sha256   url
+#
+# Neovim: the official Windows build (github.com/neovim/neovim releases).
+nvim  0.12.6  4e12b7103b601ffc8f25954b4da100f339faa73dccb69a5b135e897fa3d893ed  https://github.com/neovim/neovim/releases/download/v0.12.6/nvim-win64.zip
+#
+# GNU nano has no official Windows build: MSYS2's (the one Git for Windows
+# uses), with the runtime it needs, from the MSYS2 package repository.
+nano            9.3-1     190cdb891a5b54b5b9ba899a587b1a46741e6aa7e51614b9c1724870d058deca  https://mirror.msys2.org/msys/x86_64/nano-9.3-1-x86_64.pkg.tar.zst
+msys2-runtime   3.6.12-1  c0dbaa624e29be6d08cf5c65609dca6c749431109e4572bf446a3ca9b4c4fd7c  https://mirror.msys2.org/msys/x86_64/msys2-runtime-3.6.12-1-x86_64.pkg.tar.zst
+ncurses         6.6-2     828c92f09b17f00d3b49362fcfa4affa58e5e50e238f290ea36eb7a690da3acb  https://mirror.msys2.org/msys/x86_64/ncurses-6.6-2-x86_64.pkg.tar.zst
+libintl         0.22.5-1  336d66b9d95cf9c1804958f8e260762a3e83bf158ed5981f783bc772a31073cf  https://mirror.msys2.org/msys/x86_64/libintl-0.22.5-1-x86_64.pkg.tar.zst
+libiconv        1.19-1    0fa55ea2a6ccf97cf8c58b24b2615815e15e16e6e4e888091c263c2c83c5313d  https://mirror.msys2.org/msys/x86_64/libiconv-1.19-1-x86_64.pkg.tar.zst
+file            5.48-2    2e02f9057d63801e02f877ea62bd45914e2aa65698e70e09f808684c2669f8a5  https://mirror.msys2.org/msys/x86_64/file-5.48-2-x86_64.pkg.tar.zst
+gcc-libs        16.2.0-1  50e1bbbb1b4186ba1ed8c08cdbb5c0a8c2343e4b5747bace24273e26fb148471  https://mirror.msys2.org/msys/x86_64/gcc-libs-16.2.0-1-x86_64.pkg.tar.zst
+zlib            1.4-1     bafd3abf8b773ec28b6571d465a53a4e7afed4824cc1eec52f3bfbd6fa556ab9  https://mirror.msys2.org/msys/x86_64/zlib-1.4-1-x86_64.pkg.tar.zst
+libbz2          1.0.8-4   89fb0e1478b22b80effda55ab4ae7549388d01245d3841a096d8a2d63236c2a1  https://mirror.msys2.org/msys/x86_64/libbz2-1.0.8-4-x86_64.pkg.tar.zst
+liblzma         5.8.4-1   4b7d61656e72a5651a797680b66186338dce4f8fbc62a637ab3b59922dd01074  https://mirror.msys2.org/msys/x86_64/liblzma-5.8.4-1-x86_64.pkg.tar.zst
+libzstd         1.5.7-1   5e370b2e725a0a7e5ff58d84653c9a0cd5a10b9cfe930f2d949a28ad2a11c1f2  https://mirror.msys2.org/msys/x86_64/libzstd-1.5.7-1-x86_64.pkg.tar.zst

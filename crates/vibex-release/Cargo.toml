@@ -1,0 +1,12 @@
+[package]
+name = "vibex-release"
+description = "Release helper: update signing keys and signed update feeds"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vibex-update = { path = "../vibex-update" }
+getrandom = "0.2"

@@ -1,0 +1,16 @@
+[package]
+name = "vibex-update"
+description = "Signed update feed (format, verification, download) for Vibex Terminal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = ["Win32_Foundation", "Win32_Networking_WinHttp"]

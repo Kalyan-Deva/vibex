@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Kalyan Gopalam"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Kalyan-Deva/vibex"
+homepage = "https://github.com/Kalyan-Deva/vibex"
+
+[workspace.dependencies]
+vibex-vt = { path = "crates/vibex-vt" }
+vibex-term = { path = "crates/vibex-term" }
+vibex-pty = { path = "crates/vibex-pty" }
+vibex-render = { path = "crates/vibex-render" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# keep dependencies (font rasterising) fast in debug builds
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,33 @@
+name: Bug report
+description: Something doesn't work the way it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Vibex version
+      description: "`vibex --version`"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+  - type: dropdown
+    id: shell
+    attributes:
+      label: Shell
+      options: [PowerShell 7, Windows PowerShell 5.1, cmd, WSL, ssh, other]
+  - type: textarea
+    id: config
+    attributes:
+      label: Config and screenshots
+      description: The relevant part of vibex.lua, and a screenshot (Alt+Shift+S saves one) for anything visual.
