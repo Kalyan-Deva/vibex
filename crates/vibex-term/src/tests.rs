@@ -757,3 +757,15 @@ fn sealed_history_stays_off_screen() {
     let s = screen(&u);
     assert_eq!(s[0], "a", "{s:?}");
 }
+
+#[test]
+fn prompt_input_survives_an_image() {
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let mut t = term(40, 10, "\x1b]133;A\x07PS> \x1b]133;B\x07vshow x\r\n\x1b]133;C\x07");
+    feed(&mut t, &format!("\x1b_Ga=T,f=100,t=d,q=2,c=6,m=0;{png}\x1b\\r\n"));
+    feed(&mut t, "\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07git push --force");
+    assert_eq!(t.prompt_input().map(|i| i.text).as_deref(), Some("git push --force"));
+    // and after more output scrolls the image away
+    feed(&mut t, "\r\n\x1b]133;C\x07a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07rm -rf /");
+    assert_eq!(t.prompt_input().map(|i| i.text).as_deref(), Some("rm -rf /"));
+}

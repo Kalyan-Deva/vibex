@@ -13,6 +13,8 @@
 - **Light themes:** the tab bar, Settings, menus and dialogs now read properly on light backgrounds (darker text, deeper accents, readable text on coloured tabs).
 - **Settings:** long paths keep their file name; the theme list opens at the current theme.
 - **Config:** `vibex.lua` and `settings.lua` saved with a byte-order mark (Notepad does this) load fine instead of failing.
+- **Images:** after `vshow` drew an image, the prompt came back inside the picture and Vibex lost track of what was typed, so suggestions and the risky-command check could miss. `vibex show` now makes the image's rows first, so the cursor always lands below it. An image taller than the window is shrunk to fit.
+- **Remote control:** `vibex cli send-text -- TEXT` types TEXT as it is, even when it starts with `--`.
 - **Palette:** fuzzy search prefers close-together matches, so `set lig` finds ligatures rather than a theme.
 
 ## 0.1.0: first public release

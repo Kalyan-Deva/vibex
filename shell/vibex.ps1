@@ -26,7 +26,7 @@ if ($env:VIBEX_PROMPT -eq 'dragon') {
         $info = if ($admin) { "$e[1;31m" } else { "$e[1;34m" }
         $sym = if ($admin) { '#' } else { '$' }
         $user = $env:USERNAME
-        $hn = [System.Net.Dns]::GetHostName()
+        $hn = if ($env:VIBEX_HOSTNAME) { $env:VIBEX_HOSTNAME } else { [System.Net.Dns]::GetHostName() }
         # the path: ~ for home; six or more parts become first\…\last four
         $loc = $executionContext.SessionState.Path.CurrentLocation
         $path = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { $loc.Path }

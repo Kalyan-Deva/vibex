@@ -163,10 +163,20 @@ fn png_size(b: &[u8]) -> Option<(u32, u32)> {
     Some((u32::from_be_bytes(b[16..20].try_into().ok()?), u32::from_be_bytes(b[20..24].try_into().ok()?)))
 }
 
-/// ~8px per column and 2:1 cells: a fair guess when the terminal's cell
-/// size isn't known (only used to centre and to fit).
-const GUESS_CELL_W: f32 = 8.0;
-const CELL_ASPECT: f32 = 2.0;
+/// ~8x16px cells: a fair guess when the terminal's cell size isn't known.
+const GUESS_CELL: (f32, f32) = (8.0, 16.0);
+
+/// The terminal's cell size in pixels: Vibex tells its panes
+/// (`VIBEX_CELL_PX=9x19`), else a guess.
+fn cell_px() -> (f32, f32) {
+    std::env::var("VIBEX_CELL_PX").ok().and_then(|v| parse_cell(&v)).unwrap_or(GUESS_CELL)
+}
+
+fn parse_cell(v: &str) -> Option<(f32, f32)> {
+    let (w, h) = v.trim().split_once('x')?;
+    let (w, h) = (w.parse::<f32>().ok()?, h.parse::<f32>().ok()?);
+    (w >= 1.0 && h >= 1.0).then_some((w, h))
+}
 
 /// Kitty graphics for the default size: at most the terminal's width
 /// (the terminal keeps the aspect).
@@ -175,19 +185,32 @@ pub fn image_escape(png: &[u8], max_cols: usize) -> Result<String, String> {
     image_escape_sized(png, max_cols, 1000, Size::default())
 }
 
+pub fn image_escape_sized(png: &[u8], max_cols: usize, max_rows: usize, size: Size) -> Result<String, String> {
+    image_escape_cell(png, max_cols, max_rows, size, cell_px())
+}
+
 /// Kitty graphics: transmit + display, in 4096-byte chunks. Pixel sizes
 /// (`--scale`, `--px`) resize the PNG itself, so it shows at exactly that
 /// size; column/row sizes go to the terminal as c= / r= (only one of them,
 /// so the terminal keeps the aspect).
-pub fn image_escape_sized(png: &[u8], max_cols: usize, max_rows: usize, size: Size) -> Result<String, String> {
+///
+/// The rows are made first, with plain newlines, and the image goes in
+/// them with C=1 (the cursor stays): on Windows the shell's output passes
+/// through ConPTY, which never sees an image move the cursor, so without
+/// this its cursor and the terminal's part ways and the next prompt lands
+/// inside the picture.
+fn image_escape_cell(png: &[u8], max_cols: usize, max_rows: usize, size: Size, cell: (f32, f32)) -> Result<String, String> {
     let (w, h) = png_size(png).ok_or("not a PNG file")?;
     let (w, h) = (w.max(1), h.max(1));
+    let (cw, ch) = cell;
     let max_c = max_cols.saturating_sub(1).max(1);
+    // taller than this and it's shrunk to fit: its rows have to be on screen
+    let max_r = max_rows.saturating_sub(2).max(1);
     let mut data: Option<Vec<u8>> = None;
     let mut cols: Option<usize> = None;
     let mut rows: Option<usize> = None;
-    // the image's width in columns, for centring
-    let est: f32;
+    // the image's size in cells: width for centring, height for the rows
+    let (mut est, tall): (f32, f32);
     let target = size.px.or_else(|| size.scale.map(|s| ((w as f32 * s).round() as u32).max(1)));
     if let Some(tw) = target {
         let tw = tw.clamp(1, 16_384);
@@ -195,29 +218,36 @@ pub fn image_escape_sized(png: &[u8], max_cols: usize, max_rows: usize, size: Si
         if tw != w {
             data = Some(resize_png(png, tw, th)?);
         }
-        est = tw as f32 / GUESS_CELL_W;
+        (est, tall) = (tw as f32 / cw, th as f32 / ch);
     } else if size.actual {
-        est = w as f32 / GUESS_CELL_W;
+        (est, tall) = (w as f32 / cw, h as f32 / ch);
     } else if let Some(n) = size.width {
         cols = Some(n.min(1000));
-        est = n as f32;
+        (est, tall) = (n as f32, n as f32 * cw * h as f32 / w as f32 / ch);
     } else if let Some(n) = size.height {
         rows = Some(n.min(1000));
-        est = n as f32 * CELL_ASPECT * w as f32 / h as f32;
+        (est, tall) = (n as f32 * ch * w as f32 / h as f32 / cw, n as f32);
     } else if size.fit {
-        let max_r = max_rows.saturating_sub(2).max(1);
-        let need_rows = max_c as f32 * (h as f32 / w as f32) / CELL_ASPECT;
+        let need_rows = max_c as f32 * cw * h as f32 / w as f32 / ch;
         if need_rows <= max_r as f32 {
             cols = Some(max_c);
-            est = max_c as f32;
+            (est, tall) = (max_c as f32, need_rows);
         } else {
             rows = Some(max_r);
-            est = max_r as f32 * CELL_ASPECT * w as f32 / h as f32;
+            (est, tall) = (max_r as f32 * ch * w as f32 / h as f32 / cw, max_r as f32);
         }
     } else {
-        let c = ((w as f32 / GUESS_CELL_W).ceil() as usize).clamp(1, max_c);
+        let c = ((w as f32 / cw).ceil() as usize).clamp(1, max_c);
         cols = Some(c);
-        est = c as f32;
+        (est, tall) = (c as f32, c as f32 * cw * h as f32 / w as f32 / ch);
+    }
+    let mut n = (tall - 0.001).ceil().max(1.0) as usize;
+    if n > max_r {
+        // too tall for the window: as many rows as fit, the aspect kept
+        est = est * max_r as f32 / tall;
+        n = max_r;
+        cols = None;
+        rows = Some(max_r);
     }
     let data = base64(data.as_deref().unwrap_or(png));
     let chunks: Vec<&str> = data.as_bytes().chunks(4096).map(|c| std::str::from_utf8(c).unwrap_or("")).collect();
@@ -228,20 +258,25 @@ pub fn image_escape_sized(png: &[u8], max_cols: usize, max_rows: usize, size: Si
     if let Some(r) = rows {
         size_keys.push_str(&format!(",r={r}"));
     }
-    let mut o = String::new();
+    // the rows first (they scroll the screen as needed), then back up
+    let mut o = "\r\n".repeat(n);
+    o.push_str(&format!("\x1b[{n}A\r"));
     if size.center {
         let pad = (max_cols as f32 - est.ceil()).max(0.0) as usize / 2;
-        o.push_str(&" ".repeat(pad));
+        if pad > 0 {
+            o.push_str(&format!("\x1b[{pad}C"));
+        }
     }
     for (i, c) in chunks.iter().enumerate() {
         let more = u8::from(i + 1 < chunks.len());
         if i == 0 {
-            o.push_str(&format!("\x1b_Ga=T,f=100,t=d,q=2{size_keys},m={more};{c}\x1b\\"));
+            o.push_str(&format!("\x1b_Ga=T,f=100,t=d,C=1,q=2{size_keys},m={more};{c}\x1b\\"));
         } else {
             o.push_str(&format!("\x1b_Gm={more};{c}\x1b\\"));
         }
     }
-    o.push_str("\r\n");
+    // and below it
+    o.push_str(&format!("\x1b[{n}B\r"));
     Ok(o)
 }
 
@@ -706,19 +741,36 @@ mod tests {
         let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
         png.extend_from_slice(&640u32.to_be_bytes());
         png.extend_from_slice(&480u32.to_be_bytes());
-        let head = |s: Size| image_escape_sized(&png, 100, 40, s).unwrap().split(";").next().unwrap().to_string();
+        let cell = (8.0, 16.0);
+        let head = |s: Size| image_escape_cell(&png, 100, 40, s, cell).unwrap().split(";").next().unwrap().to_string();
         assert!(head(Size { width: Some(30), ..Default::default() }).ends_with("q=2,c=30,m=0"));
         assert!(head(Size { height: Some(10), ..Default::default() }).ends_with("q=2,r=10,m=0"));
         // 640x480 at 99 columns would want ~37 rows: fits in 38
         assert!(head(Size { fit: true, ..Default::default() }).ends_with("c=99,m=0"));
-        let tall = |s: Size| image_escape_sized(&png, 100, 20, s).unwrap();
+        let tall = |s: Size| image_escape_cell(&png, 100, 20, s, cell).unwrap();
         assert!(tall(Size { fit: true, ..Default::default() }).contains(",r=18,"));
         assert!(head(Size { actual: true, ..Default::default() }).ends_with("q=2,m=0"));
-        let centred = image_escape_sized(&png, 100, 40, Size { width: Some(40), center: true, ..Default::default() }).unwrap();
-        assert!(centred.starts_with(&format!("{}\x1b_G", " ".repeat(30))));
+        let centred = image_escape_cell(&png, 100, 40, Size { width: Some(40), center: true, ..Default::default() }, cell).unwrap();
+        assert!(centred.contains("\x1b[30C\x1b_G"), "{centred}");
         assert_eq!(parse_scale("50%"), Some(0.5));
         assert_eq!(parse_scale("2x"), Some(2.0));
         assert_eq!(parse_scale("0"), None);
+    }
+
+    #[test]
+    fn makes_the_rows_first() {
+        // 640x480 at 30 columns of 8x16 cells: 30*8*480/640/16 = 11.25 rows -> 12
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend_from_slice(&640u32.to_be_bytes());
+        png.extend_from_slice(&480u32.to_be_bytes());
+        let esc = image_escape_cell(&png, 100, 40, Size { width: Some(30), ..Default::default() }, (8.0, 16.0)).unwrap();
+        assert!(esc.starts_with(&format!("{}\x1b[12A\r\x1b_G", "\r\n".repeat(12))), "{esc}");
+        assert!(esc.ends_with("\x1b[12B\r"));
+        // taller than the window: shrunk to its rows (40 - 2)
+        let esc = image_escape_cell(&png, 100, 40, Size { width: Some(120), ..Default::default() }, (8.0, 16.0)).unwrap();
+        assert!(esc.contains(",r=38,") && !esc.contains(",c=") && esc.ends_with("\x1b[38B\r"), "{esc}");
+        assert_eq!(parse_cell("9x19"), Some((9.0, 19.0)));
+        assert_eq!(parse_cell("x"), None);
     }
 
     #[test]
@@ -741,7 +793,7 @@ mod tests {
         // the left pixel averages columns 0-1 of both rows: (0+30+120+150)/4
         assert_eq!(out[0], 75);
         let esc = image_escape_sized(&png, 100, 40, Size { scale: Some(0.5), ..Default::default() }).unwrap();
-        assert!(esc.starts_with("\x1b_Ga=T,f=100,t=d,q=2,m=0;"));
+        assert!(esc.contains("\x1b_Ga=T,f=100,t=d,C=1,q=2,m=0;"));
     }
 
     #[test]
@@ -754,7 +806,7 @@ mod tests {
         png.extend_from_slice(&480u32.to_be_bytes());
         assert_eq!(png_size(&png), Some((640, 480)));
         let esc = image_escape(&png, 100).unwrap();
-        assert!(esc.starts_with("\x1b_Ga=T,f=100,t=d,q=2,c=80,m=0;"), "{esc}");
+        assert!(esc.contains("\x1b_Ga=T,f=100,t=d,C=1,q=2,c=80,m=0;"), "{esc}");
         assert!(image_escape(b"nope", 80).is_err());
     }
 }

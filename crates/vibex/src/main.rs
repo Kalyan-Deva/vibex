@@ -513,7 +513,7 @@ const CLI_USAGE: &str = "usage: vibex cli COMMAND [options]   (needs config.remo
   list                                  windows, tabs and panes as JSON lines
   spawn [--cwd DIR] [--profile P] [-- PROGRAM ARGS]   new tab; prints its pane id
   split --right|--down [--pane N] [-- PROGRAM ARGS]   prints the new pane id
-  send-text [--pane N] [--enter] TEXT   type TEXT into a pane
+  send-text [--pane N] [--enter] [--] TEXT   type TEXT into a pane (after --, as it is)
   get-text [--pane N] [--lines N]       print a pane's text (default: the screen)
   export [--pane N] [--format png|txt|ans|html|svg|md] [--out FILE] [--copy]
          [--block | --all | --last N | --from A --to B]
@@ -1130,7 +1130,8 @@ impl App {
                 "send-text" => {
                     let id = need(pane)?;
                     let w = find(&self.sessions, id).ok_or("error: no such pane")?;
-                    let mut text = words.join(" ");
+                    // after `--`, the text as it is (so it can start with --)
+                    let mut text = program.as_ref().unwrap_or(&words).join(" ");
                     if flags.contains_key("--enter") {
                         text.push('\r');
                     }
@@ -1929,6 +1930,8 @@ impl Session {
         self.next_pane = id + 1;
         let mut cmd = cmd;
         cmd.env.push(("VIBEX_PANE".into(), id.to_string()));
+        // the cell size in pixels: `vibex show` reserves an image's rows with it
+        cmd.env.push(("VIBEX_CELL_PX".into(), format!("{}x{}", self.renderer.fonts.cell_width as u32, self.renderer.fonts.cell_height as u32)));
         commands::prepare_with(&mut cmd, self.config.linux_commands, &self.config.prompt);
         let proxy = self.proxy.clone();
         let pane = Pane::spawn(id, &p.name, &cmd, cols, rows, &self.pane_options(), move || {

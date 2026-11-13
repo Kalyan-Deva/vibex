@@ -74,8 +74,12 @@ pub fn prepare_with(cmd: &mut Command, on: bool, prompt: &str) {
     }
     cmd.env.push(("VIBEX_COMMANDS".into(), if on { "1" } else { "0" }.into()));
     // into WSL too
+    let has_cell = cmd.env.iter().any(|(k, _)| k == "VIBEX_CELL_PX");
     if let Some((_, v)) = cmd.env.iter_mut().find(|(k, _)| k == "WSLENV") {
-        for name in ["VIBEX_COMMANDS", "VIBEX_PROMPT"] {
+        for name in ["VIBEX_COMMANDS", "VIBEX_PROMPT", "VIBEX_CELL_PX"] {
+            if name == "VIBEX_CELL_PX" && !has_cell {
+                continue;
+            }
             if !v.split(':').any(|p| p == name) {
                 v.push(':');
                 v.push_str(name);

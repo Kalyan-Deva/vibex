@@ -51,14 +51,33 @@ target\release\vibex.exe
 
 **Shell integration** (prompt marks, command blocks, the Linux/Windows commands): add one line to your PowerShell `$PROFILE` or `~/.bashrc`, as described in [docs/SHELL_INTEGRATION.md](docs/SHELL_INTEGRATION.md).
 
+## Quick start
+
+Open Vibex and try a few things:
+
+```powershell
+ls -la                           # Linux commands work in PowerShell
+cat notes.txt | grep -n TODO
+vshow --width 40 logo.png        # an image, right in the terminal
+vshow README.md                  # Markdown, rendered
+nano notes.txt                   # nano and Neovim come bundled
+```
+
+- <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> opens the command palette, which lists every action with its key.
+- <kbd>Ctrl</kbd>+<kbd>,</kbd> opens Settings. Try *Appearance → Style* and *Appearance → Theme*.
+- <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>=</kbd> splits the pane, and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> opens a new tab.
+
 ## Features
 
 ### Terminal
 - **Own engine:** a DEC/ANSI parser, screen and scrollback with reflow, alternate screen, scroll regions, and xterm modifier keys.
 - **Rendering:** wgpu (DirectX 12 / Vulkan) with a CPU fallback and a hand-written glyph rasteriser. It supports ligatures, COLR v0/v1 colour emoji, and full grapheme clusters (ZWJ families, flags, skin tones).
-- **Kali Linux look:** Kali's colours (Dragon Dark), its two-line `┌──(user㉿host)-[~]` prompt, its `ls`, and a QTerminal-style title bar with a menu bar, all from Kali's own configuration. One click: Settings → Appearance → Style → *Dragon (Kali Linux)*. See [The Kali Linux look](docs/CONFIG.md#the-kali-linux-look).
-- **Look:** acrylic and glass transparency, a frameless window with its own title bar, rounded corners, 54 built-in themes, from Catppuccin, Dracula, Monokai and Gruvbox to Solarized and Tokyo Night, light and dark (or your own colours), and smooth scrolling.
-- **Inline images:** sixel and the kitty graphics protocol. `vshow` draws PNGs and rendered Markdown right in the terminal, with `--width`, `--fit`, `--scale 50%` and more.
+- **Two styles, one click apart** (Settings → Appearance → Style, or `vibex cli style vibex|dragon`):
+  - *Vibex*: a frameless window with its own tab bar, rounded corners, and acrylic or glass transparency.
+  - *Dragon (Kali Linux)*: Kali's colours (Dragon Dark), its two-line `┌──(user㉿host)-[~]` prompt, its coloured `ls`, and a classic title bar with a menu bar, all taken from Kali's own configuration. See [The Kali Linux look](docs/CONFIG.md#the-kali-linux-look).
+  - Switching back to *Vibex* takes every Dragon setting off again, and each piece (theme, prompt, title bar) can also be set on its own in `vibex.lua`.
+- **54 built-in themes**, light and dark: Catppuccin, Dracula, Nord, One Dark, Monokai, Gruvbox, Solarized, Tokyo Night, Rosé Pine, Kanagawa and more, or your own colours. Smooth scrolling throughout.
+- **Inline images:** sixel and the kitty graphics protocol. `vshow` draws PNGs and rendered Markdown right in the terminal, with `--width`, `--height`, `--fit`, `--scale 50%`, `--center` and more. An image taller than the window is shrunk to fit, and the prompt always comes back below it.
 - **Modern protocols:** OSC 8 hyperlinks, OSC 52 clipboard, OSC 9/777 notifications, the kitty keyboard protocol, IME input, and Ctrl+click on URLs and `path:line`.
 - **Accessibility:** screen readers through UI Automation.
 
@@ -120,6 +139,8 @@ target\release\vibex.exe
 | ![Command palette](docs/images/palette.png) | ![Right-click menu](docs/images/menu.png) |
 | **Suggestions and completions** | **Settings** |
 | ![Completions](docs/images/suggest.png) | ![Settings](docs/images/settings.png) |
+| **Secret guard and risky-command check** | |
+| ![Security](docs/images/security.png) | |
 
 ## Shortcuts
 
@@ -170,6 +191,7 @@ Every option, event and action is in [docs/CONFIG.md](docs/CONFIG.md). Run `vibe
 | [docs/INSTALL.md](docs/INSTALL.md) | the installer, command line, updates and releasing |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how the crates fit together |
 | [CHANGELOG.md](CHANGELOG.md) | what changed in each release |
+| [CONTRIBUTING.md](CONTRIBUTING.md) / [SECURITY.md](SECURITY.md) | building and testing, and reporting a security problem |
 
 ## Project layout
 
