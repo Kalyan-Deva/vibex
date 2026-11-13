@@ -219,6 +219,9 @@ impl Engine {
             return Ok((Engine::empty(), config));
         };
         let src = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // Notepad and others start UTF-8 files with a byte-order mark, which
+        // Lua can't parse
+        let src = without_bom(&src);
         let mut engine = Engine::empty();
         engine.install().map_err(|e| e.to_string())?;
         // let `require` find helper modules next to vibex.lua
@@ -227,7 +230,7 @@ impl Engine {
             let cur: String = pkg.get("path").unwrap_or_default();
             let _ = pkg.set("path", format!("{}\\?.lua;{cur}", dir.display()));
         }
-        let value: Value = engine.lua.load(&src).set_name("vibex.lua").eval().map_err(|e| clean_error(&e.to_string()))?;
+        let value: Value = engine.lua.load(src).set_name("vibex.lua").eval().map_err(|e| clean_error(&e.to_string()))?;
         let table = match value {
             Value::Table(t) => t,
             Value::Nil => return Err("vibex.lua must `return` a config table".into()),
@@ -678,6 +681,11 @@ fn parse_plain_action(v: &Value) -> Result<Action, String> {
         "ResizePane" => Ok(Action::ResizePane(dir(&arg)?)),
         n => Action::named(n).ok_or_else(|| format!("unknown action '{n}'")),
     }
+}
+
+/// `text` without a leading UTF-8 byte-order mark.
+pub fn without_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 /// Levenshtein distance (for "did you mean").
@@ -1301,6 +1309,13 @@ mod tests {
         // a failed load doesn't retry until the file changes again
         assert!(w.poll().is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_fine() {
+        // what Notepad writes: EF BB BF, then the file
+        let c = load_src("\u{feff}-- my config\nreturn { theme = \"dracula\" }").unwrap().1;
+        assert_eq!(c.theme.identify(), Some("dracula"));
     }
 
     #[test]

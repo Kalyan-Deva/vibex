@@ -215,7 +215,7 @@ impl Settings {
     }
 
     pub fn load(path: &Path) -> Settings {
-        std::fs::read_to_string(path).ok().and_then(|src| Settings::parse(&src).ok()).unwrap_or_default()
+        std::fs::read_to_string(path).ok().and_then(|src| Settings::parse(crate::lua::without_bom(&src)).ok()).unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
