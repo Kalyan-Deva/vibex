@@ -538,6 +538,6 @@ mod tests {
     #[test]
     fn install_dir_is_per_user() {
         let d = install_dir();
-        assert!(d.ends_with(r"Programs\Vibex"));
+        assert!(d.ends_with(Path::new("Programs").join("Vibex")));
     }
 }

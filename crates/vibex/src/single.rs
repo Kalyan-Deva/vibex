@@ -15,8 +15,9 @@
 //! Wire format: the client writes `<length>\n<payload>`; the server replies
 //! with text and hangs up.
 
-// The handoff is Windows-only for now; elsewhere each launch is its own
-// process (the request type still compiles for tests).
+// The handoff uses a named pipe on Windows and a Unix socket elsewhere;
+// on other platforms each launch is its own process (the request type
+// still compiles for tests).
 #![cfg_attr(not(any(windows, unix)), allow(dead_code))]
 
 use std::path::PathBuf;
@@ -47,6 +48,8 @@ pub enum Request {
     Open(OpenRequest),
     /// `vibex cli <args...>`.
     Cli(Vec<String>),
+    /// `vibex quake`: show or hide the dropdown.
+    Quake,
 }
 
 const REC: char = '\u{1e}';
@@ -111,6 +114,7 @@ impl Request {
     pub fn encode(&self) -> String {
         match self {
             Request::Open(r) => r.encode(),
+            Request::Quake => "vibex-quake-1".into(),
             Request::Cli(args) => {
                 let clean = |v: &str| v.replace([REC, UNIT], "");
                 format!("vibex-cli-1{REC}{}", args.iter().map(|a| clean(a)).collect::<Vec<_>>().join(&UNIT.to_string()))
@@ -119,6 +123,9 @@ impl Request {
     }
 
     pub fn decode(s: &str) -> Option<Self> {
+        if s == "vibex-quake-1" {
+            return Some(Request::Quake);
+        }
         if let Some(rest) = s.strip_prefix("vibex-cli-1") {
             let rest = rest.strip_prefix(REC).unwrap_or(rest);
             let args = if rest.is_empty() { Vec::new() } else { rest.split(UNIT).map(str::to_string).collect() };
@@ -323,8 +330,25 @@ mod imp {
     }
 }
 
+/// On Windows the pipe is only created once the event loop can answer, so
+/// a claim reserves nothing yet; see the Unix one.
 #[cfg(windows)]
-pub use imp::{forward, send, serve};
+pub struct Claim;
+
+#[cfg(windows)]
+impl Claim {
+    pub fn serve(self, handle: impl Fn(Request) -> String + Send + 'static) -> bool {
+        imp::serve(handle)
+    }
+}
+
+#[cfg(windows)]
+pub fn claim() -> Option<Claim> {
+    Some(Claim)
+}
+
+#[cfg(windows)]
+pub use imp::{forward, send};
 
 #[cfg(unix)]
 mod imp {
@@ -398,6 +422,10 @@ mod imp {
         // remote control may take a moment, so no read timeout
         let mut reply = Vec::new();
         s.take(64 * 1024 * 1024).read_to_end(&mut reply).ok()?;
+        // every reply has text; none means the holder exited before serving
+        if reply.is_empty() {
+            return None;
+        }
         Some(String::from_utf8_lossy(&reply).into_owned())
     }
 
@@ -412,42 +440,57 @@ mod imp {
         send(&Request::Open(req.clone())).is_some()
     }
 
-    /// Become the instance others talk to; `handle` turns each request
-    /// into the reply. False if another process already is.
-    pub fn serve(handle: impl Fn(Request) -> String + Send + 'static) -> bool {
-        match socket_path(&instance()) {
-            Some(p) => serve_on(&p, handle),
-            None => false,
+    /// The socket name, held from early in startup until the event loop can
+    /// answer. Launches in between connect and wait for their reply instead
+    /// of starting a second Vibex.
+    pub struct Claim(UnixListener);
+
+    impl Claim {
+        /// Start answering; `handle` turns each request into the reply.
+        pub fn serve(self, handle: impl Fn(Request) -> String + Send + 'static) -> bool {
+            let listener = self.0;
+            std::thread::Builder::new()
+                .name("vibex-single-instance".into())
+                .spawn(move || {
+                    for conn in listener.incoming() {
+                        let Ok(mut s) = conn else { continue };
+                        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+                        let reply = match read_request(&mut s).as_deref().and_then(Request::decode) {
+                            Some(req) => handle(req),
+                            None => "error: bad request".into(),
+                        };
+                        let _ = s.write_all(reply.as_bytes());
+                    }
+                })
+                .is_ok()
         }
     }
 
-    pub(super) fn serve_on(path: &std::path::Path, handle: impl Fn(Request) -> String + Send + 'static) -> bool {
+    /// Take the name before the slow part of startup. None if another
+    /// process already holds it.
+    pub fn claim() -> Option<Claim> {
+        claim_on(&socket_path(&instance())?)
+    }
+
+    pub(super) fn claim_on(path: &std::path::Path) -> Option<Claim> {
         // a live socket means another Vibex owns the name; a dead one is stale
         if UnixStream::connect(path).is_ok() {
-            return false;
+            return None;
         }
         let _ = std::fs::remove_file(path);
-        let Ok(listener) = UnixListener::bind(path) else { return false };
+        let listener = UnixListener::bind(path).ok()?;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        std::thread::Builder::new()
-            .name("vibex-single-instance".into())
-            .spawn(move || {
-                for conn in listener.incoming() {
-                    let Ok(mut s) = conn else { continue };
-                    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
-                    let reply = match read_request(&mut s).as_deref().and_then(Request::decode) {
-                        Some(req) => handle(req),
-                        None => "error: bad request".into(),
-                    };
-                    let _ = s.write_all(reply.as_bytes());
-                }
-            })
-            .is_ok()
+        Some(Claim(listener))
+    }
+
+    #[cfg(test)]
+    pub(super) fn serve_on(path: &std::path::Path, handle: impl Fn(Request) -> String + Send + 'static) -> bool {
+        claim_on(path).is_some_and(|c| c.serve(handle))
     }
 }
 
 #[cfg(unix)]
-pub use imp::{forward, send, serve};
+pub use imp::{claim, forward, send};
 
 #[cfg(not(any(windows, unix)))]
 pub fn forward(_req: &OpenRequest) -> bool {
@@ -460,8 +503,18 @@ pub fn send(_req: &Request) -> Option<String> {
 }
 
 #[cfg(not(any(windows, unix)))]
-pub fn serve(_handle: impl Fn(Request) -> String + Send + 'static) -> bool {
-    false
+pub struct Claim;
+
+#[cfg(not(any(windows, unix)))]
+impl Claim {
+    pub fn serve(self, _handle: impl Fn(Request) -> String + Send + 'static) -> bool {
+        false
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn claim() -> Option<Claim> {
+    None
 }
 
 #[cfg(test)]
@@ -485,6 +538,7 @@ mod tests {
         assert_eq!(Request::decode(&cli.encode()), Some(cli));
         assert_eq!(Request::decode(&Request::Open(r.clone()).encode()), Some(Request::Open(r)));
         assert_eq!(Request::decode(&Request::Cli(Vec::new()).encode()), Some(Request::Cli(Vec::new())));
+        assert_eq!(Request::decode(&Request::Quake.encode()), Some(Request::Quake));
     }
 
     #[cfg(windows)]
@@ -498,7 +552,7 @@ mod tests {
         assert!(imp::serve_on(name.clone(), move |r| {
             let reply = match &r {
                 Request::Cli(a) => format!("echo {}", a.join(" ")),
-                Request::Open(_) => "ok".into(),
+                Request::Open(_) | Request::Quake => "ok".into(),
             };
             tx.lock().unwrap().send(r).unwrap();
             reply
@@ -529,7 +583,7 @@ mod tests {
         assert!(imp::serve_on(&path, move |r| {
             let reply = match &r {
                 Request::Cli(a) => format!("echo {}", a.join(" ")),
-                Request::Open(_) => "ok".into(),
+                Request::Open(_) | Request::Quake => "ok".into(),
             };
             tx.lock().unwrap().send(r).unwrap();
             reply
@@ -545,6 +599,40 @@ mod tests {
         let reply = imp::send_to(&path, &Request::Cli(vec!["list".into(), big.clone()])).unwrap();
         assert_eq!(reply.len(), "echo list ".len() + big.len(), "large payloads both ways");
         assert!(imp::send_to(&dir.join("nobody.sock"), &Request::Cli(vec![])).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A launch during the first one's startup waits for the reply instead of
+    // finding no Vibex and starting its own.
+    #[cfg(unix)]
+    #[test]
+    fn requests_wait_for_a_claim_still_starting() {
+        use std::time::{Duration, Instant};
+        let dir = std::env::temp_dir().join(format!("vibex-test-claim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("single.sock");
+        let claim = imp::claim_on(&path).expect("free name");
+        assert!(imp::claim_on(&path).is_none(), "a held claim is not stale");
+        let client = {
+            let path = path.clone();
+            std::thread::spawn(move || imp::send_to(&path, &Request::Quake))
+        };
+        // the slow part of startup
+        std::thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        assert!(claim.serve(|_| "ok".into()));
+        assert_eq!(client.join().unwrap().as_deref(), Some("ok"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // a holder that exits without serving reads as no Vibex at all
+        let gone = dir.join("gone.sock");
+        let claim = imp::claim_on(&gone).unwrap();
+        let client = {
+            let gone = gone.clone();
+            std::thread::spawn(move || imp::send_to(&gone, &Request::Quake))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        drop(claim);
+        assert_eq!(client.join().unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

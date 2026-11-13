@@ -23,10 +23,11 @@ jobs:
       - run: cargo test --workspace
 
   linux:
-    name: Linux (portable crates)
+    name: Linux (build + all tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p vibex-vt -p vibex-term
+      - run: cargo build --workspace
+      - run: cargo test --workspace

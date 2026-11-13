@@ -477,6 +477,22 @@ fn settings_dialog_rect(content: PxRect, scale: f32) -> PxRect {
     PxRect { x: (content.x + (content.w - w) / 2.0).round(), y: (content.y + (content.h - h) / 2.0).round(), w: w.round(), h: h.round() }
 }
 
+/// `vibex quake`: toggle the dropdown in the running Vibex, starting one
+/// (with the dropdown open) if none is running. Bind this to a key in your
+/// desktop's shortcut settings.
+fn run_quake() -> i32 {
+    if single::send(&single::Request::Quake).is_some() {
+        return 0;
+    }
+    match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--quake").stdin(std::process::Stdio::null()).spawn()) {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("vibex: couldn't start Vibex: {e}");
+            1
+        }
+    }
+}
+
 fn run_cli(mut args: Vec<String>) -> i32 {
     if args.is_empty() || matches!(args[0].as_str(), "help" | "--help" | "-h") {
         println!("{CLI_USAGE}");
@@ -6695,6 +6711,7 @@ const USAGE: &str = "usage: vibex [OPTIONS] [-- PROGRAM ARGS]
 
 Commands:
   cli ...          drive the running Vibex (needs remote control): vibex cli help
+  quake            show or hide the dropdown (starts Vibex if needed); bind it to a key
   show FILE...     draw PNG images and Markdown in the terminal
   audit verify|report   check / report the hash-chained command log
   editors [check|update]  the bundled nano and Neovim: versions, look for / install new ones
@@ -6706,6 +6723,7 @@ Options:
   --cwd DIR        start the first tab in DIR
   -- PROGRAM ARGS  run PROGRAM in the first tab instead of a shell (stays open until Enter)
   --no-restore     don't reopen the last session
+  --quake          start with the dropdown window
   --new-process    open in a new process instead of the running Vibex
   --layout NAME    open ~/.config/vibex/layouts/NAME.lua as a new workspace
   --config PATH    use this config file instead of ~/.config/vibex/vibex.lua
@@ -6740,6 +6758,9 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("cli") {
         std::process::exit(run_cli(std::env::args().skip(2).collect()));
     }
+    if std::env::args().nth(1).as_deref() == Some("quake") {
+        std::process::exit(run_quake());
+    }
     if std::env::args().nth(1).as_deref() == Some("icons") {
         std::process::exit(run_icons(std::env::args().skip(2).collect()));
     }
@@ -6759,6 +6780,7 @@ fn main() {
     let mut cwd: Option<String> = None;
     let mut exec: Option<Vec<String>> = None;
     let mut no_restore = false;
+    let mut quake_first = false;
     let mut new_process = false;
     let mut layout: Option<String> = None;
     let mut attach: Option<String> = None;
@@ -6791,6 +6813,7 @@ fn main() {
             "--palette" => preview_palette = true,
             "--quick" => preview_quick = true,
             "--no-restore" => no_restore = true,
+            "--quake" => quake_first = true,
             "--new-process" => new_process = true,
             "--layout" | "-l" => layout = args.next(),
             "attach" => attach = Some(args.next().unwrap_or_default()),
@@ -6815,11 +6838,23 @@ fn main() {
 
     // a Vibex is already running: it opens the window, this process exits
     let forwardable = !new_process && !explicit_config && !check_only && preview_out.is_none();
+    // hold the single-instance name from here, before the slow config load,
+    // so launches during startup wait for this process instead of becoming
+    // a second Vibex
+    let mut claim = None;
     if forwardable {
         let exec = exec.clone().filter(|a| !a.is_empty());
         // `vibex -- cmd` runs where it was typed
         let cwd = cwd.clone().or_else(|| exec.as_ref().and_then(|_| std::env::current_dir().ok()).map(|d| d.to_string_lossy().into_owned()));
-        if single::forward(&single::OpenRequest { profile: profile.clone(), cwd, exec, config: None, layout: layout.clone(), attach: attach.clone() }) {
+        let req = single::OpenRequest { profile: profile.clone(), cwd, exec, config: None, layout: layout.clone(), attach: attach.clone() };
+        // `--quake` asks a running Vibex for its dropdown, not a new window
+        let hand_off = || if quake_first { single::send(&single::Request::Quake).is_some() } else { single::forward(&req) };
+        if hand_off() {
+            return;
+        }
+        claim = single::claim();
+        // another launch took the name between our check and the claim
+        if claim.is_none() && hand_off() {
             return;
         }
     }
@@ -6896,7 +6931,10 @@ fn main() {
                 None
             }
         });
-    let mut startup = Startup { config, engine, config_path, error, profile, cwd, exec, restore, settings, name: None, quake: false, adopt: None };
+    let mut startup = Startup { config, engine, config_path, error, profile, cwd, exec, restore, settings, name: None, quake: quake_first, adopt: None };
+    if quake_first {
+        startup.restore = None;
+    }
     if let Some(l) = layout {
         let from_layout = startup_for(single::OpenRequest { layout: Some(l), ..Default::default() });
         if from_layout.restore.is_some() {
@@ -6907,12 +6945,16 @@ fn main() {
         }
     }
     let proxy = event_loop.create_proxy();
-    if forwardable {
+    if let Some(claim) = claim {
         let p = proxy.clone();
         // become the process later launches hand their windows to
-        single::serve(move |req| match req {
+        claim.serve(move |req| match req {
             single::Request::Open(r) => {
                 let _ = p.send_event(AppEvent::Open(r));
+                "ok".into()
+            }
+            single::Request::Quake => {
+                let _ = p.send_event(AppEvent::Quake);
                 "ok".into()
             }
             single::Request::Cli(args) => {
@@ -6931,7 +6973,8 @@ fn main() {
     }
     // the Quake-style dropdown's global hotkey (first instance only)
     let mut notice = None;
-    if forwardable {
+    // elsewhere there is no global hotkey: `vibex quake` is bound in the desktop
+    if forwardable && cfg!(windows) {
         if let Some((key, mods, _)) = startup.config.quake.clone() {
             if let Ok((m, vk)) = hotkey::parse(&key, &mods) {
                 let p = proxy.clone();
