@@ -1,9 +1,12 @@
 # Vibex shell integration for bash (WSL / Linux).
 #
 # Adds OSC 133 prompt marks and OSC 7 working-directory reports. Only
-# active inside Vibex (Vibex forwards TERM_PROGRAM into WSL via WSLENV).
+# active inside Vibex (it sets TERM_PROGRAM=Vibex, and forwards it into WSL
+# via WSLENV).
 #
-# Use it from ~/.bashrc:
+# Use it from ~/.bashrc. Linux install:
+#   [ -f ~/.local/share/vibex/shell/vibex.bash ] && . ~/.local/share/vibex/shell/vibex.bash
+# WSL:
 #   [ -f /mnt/c/path/to/Vibex-terminal/shell/vibex.bash ] && . /mnt/c/path/to/Vibex-terminal/shell/vibex.bash
 
 if [ "$TERM_PROGRAM" = "Vibex" ] && [ -z "$__VIBEX_INTEGRATED" ]; then

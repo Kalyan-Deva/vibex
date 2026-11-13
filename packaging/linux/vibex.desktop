@@ -1,0 +1,25 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Vibex
+GenericName=Terminal
+Comment=A GPU-accelerated terminal with tabs, splits and a Quake dropdown
+Keywords=shell;prompt;command;commandline;cmd;terminal;console;
+Icon=vibex
+TryExec=vibex
+Exec=vibex
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=vibex
+# a running Vibex takes the window and this process exits at once, so a
+# launch-feedback cursor would spin until it timed out
+StartupNotify=false
+Actions=new-window;quake;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=vibex --no-restore
+
+[Desktop Action quake]
+Name=Quake Dropdown
+Exec=vibex quake

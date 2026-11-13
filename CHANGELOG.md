@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Linux beta:** a per-user tarball install (`tools/package.sh` builds it, `install.sh` installs into `~/.local` with an app-menu entry and icons, `--uninstall` removes it), the single-instance hand-off over a Unix socket, and `vibex quake` to show or hide the dropdown from a desktop shortcut.
+- Launches during startup now wait for the starting Vibex instead of opening a second one.
+- CI builds and tests the whole workspace on Linux.
+
 ## 0.1.0: first public release
 
 Everything in the [README](README.md#features). The headline features:

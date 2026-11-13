@@ -24,6 +24,17 @@ if (Test-Path $vibexIntegration) { . $vibexIntegration }
 
 It wraps your existing `prompt` function, so a custom prompt keeps working.
 
+## bash (Linux)
+
+The Linux install puts the script in `~/.local/share/vibex/shell/`. Add to `~/.bashrc`:
+
+```bash
+__vibex_sh="$HOME/.local/share/vibex/shell/vibex.bash"
+[ -f "$__vibex_sh" ] && . "$__vibex_sh"
+```
+
+(Use `/usr/local/share/vibex/shell/vibex.bash` if you installed with `--prefix /usr/local`.) Vibex sets `TERM_PROGRAM=Vibex` for its shells, so the script does nothing in other terminals.
+
 ## bash (WSL)
 
 Add to `~/.bashrc`:

@@ -48,14 +48,55 @@ vibex --preview out.bmp    render a sample window, no GUI (--palette / --quick)
 vibex --version
 ```
 
-## Linux and macOS
+## Linux
 
-The same code builds on Linux and macOS: the pseudoterminal is a `posix_openpt` pty (the child gets its own session and controlling terminal, so job control and Ctrl+C work, and resizes send SIGWINCH). Defaults there: a login shell from `$SHELL` plus `sh`, fonts from `/usr/share/fonts`, `~/.local/share/fonts` or `/Library/Fonts` (DejaVu Sans Mono, Liberation Mono, Noto Sans Mono, Ubuntu Mono or Menlo), links opened with `xdg-open` / `open`, notifications through `notify-send`.
+### Install from the tarball
 
-    cargo build --release -p vibex
-    ./target/release/vibex
+Download `vibex-<version>-linux-x86_64.tar.gz` (and its `.sha256`) from [Releases](https://github.com/Kalyan-Deva/vibex/releases/latest), then:
 
-Status: Linux is built and tested (unit tests, a real pty, headless rendering) in WSL Ubuntu 24.04. macOS compiles but hasn't been run (that needs a Mac). Not yet on Unix: the single-instance handoff (each launch is its own process) and an installer.
+```bash
+sha256sum -c vibex-<version>-linux-x86_64.tar.gz.sha256
+tar xzf vibex-<version>-linux-x86_64.tar.gz
+cd vibex-<version>-linux-x86_64
+./install.sh
+```
+
+`install.sh` installs per user into `~/.local`, with no root needed. Run it again with a newer tarball to update; a running Vibex keeps working until you restart it.
+
+| | |
+|---|---|
+| Files | `~/.local/bin/vibex`; `~/.local/share/vibex/shell/vibex.bash` (shell integration); docs and licences in `~/.local/share/doc/vibex/` |
+| App menu | **Vibex** under System / Terminal, with **New Window** and **Quake Dropdown** actions on its right-click menu |
+| Icons | `~/.local/share/icons/hicolor/<size>/apps/vibex.png`, 16 to 512 px |
+
+Options:
+
+- `./install.sh --prefix /usr/local` installs system-wide (run it with `sudo`).
+- `./install.sh --uninstall` removes exactly the files the install put there (add `--prefix` if you used one). Your config in `~/.config/vibex` is never touched.
+
+If `~/.local/bin` isn't on your `PATH`, the installer says so. The menu entry works either way, because it uses the full path.
+
+### Quake dropdown
+
+Linux has no app-level global hotkey, so bind the command `vibex quake` to a key in your desktop's keyboard-shortcut settings (GNOME: Settings → Keyboard → Custom Shortcuts; KDE: System Settings → Shortcuts → Custom Shortcuts; Xfce: Keyboard → Application Shortcuts). It shows or hides the dropdown, and starts Vibex if it isn't running.
+
+### Build the tarball
+
+```bash
+tools/package.sh
+```
+
+This builds the release binary and writes `dist/vibex-<version>-linux-<arch>.tar.gz` plus a `.sha256`. No system libraries are needed to build: the binary links only libc and loads X11 / Wayland at run time.
+
+### How it runs
+
+The pseudoterminal is a `posix_openpt` pty (the child gets its own session and controlling terminal, so job control and Ctrl+C work, and resizes send SIGWINCH). Defaults: a login shell from `$SHELL` plus `sh`, fonts from `/usr/share/fonts` or `~/.local/share/fonts` (DejaVu Sans Mono, Liberation Mono, Noto Sans Mono or Ubuntu Mono), links opened with `xdg-open`, notifications through `notify-send`. Launching `vibex` while it's running opens a new window in the running process (through a socket in `$XDG_RUNTIME_DIR`), the same as on Windows.
+
+Status: tested on X11 (Kali). Wayland, GNOME and KDE haven't been tried yet. Updating from inside Vibex is Windows-only for now; on Linux, install the new tarball.
+
+## macOS
+
+The same code compiles on macOS (`cargo build --release -p vibex`), with fonts from `/Library/Fonts` (Menlo) and links opened with `open`. It hasn't been run yet (that needs a Mac), and there's no app bundle.
 
 ## Updates
 

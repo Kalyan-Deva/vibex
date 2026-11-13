@@ -37,6 +37,8 @@
 - It isn't code-signed yet, so Windows SmartScreen may warn the first time: choose *More info* → *Run anyway*.
 - The release page lists the SHA-256 so you can verify the download.
 
+**Linux:** download `vibex-<version>-linux-x86_64.tar.gz`, unpack it and run `./install.sh`. It installs per user into `~/.local` with an app-menu entry, and needs no root. For the Quake dropdown, bind `vibex quake` to a key in your desktop's shortcut settings. See [Linux in docs/INSTALL.md](docs/INSTALL.md#linux).
+
 **From source:**
 
 ```powershell
@@ -188,9 +190,9 @@ Every option, event and action is in [docs/CONFIG.md](docs/CONFIG.md). Run `vibe
 
 **Windows 10 and 11** are the main platform, and Vibex is used there daily.
 
-**Linux** builds and passes its tests, including a real pty and headless rendering. **macOS** compiles. Neither has an installer yet, and the single-instance hand-off is Windows-only.
+**Linux** is in beta: it passes the full test suite in CI, has a per-user tarball install with an app-menu entry, the single-instance hand-off and the Quake dropdown (through `vibex quake`). It has been run on X11; Wayland isn't tested yet, and updates are by installing the new tarball. **macOS** compiles but hasn't been run.
 
-**Planned:** packaging for Linux, listing in Windows' *default terminal* setting (needs MSIX), and winget.
+**Planned:** Wayland testing and a `.deb` / AppImage for Linux, listing in Windows' *default terminal* setting (needs MSIX), and winget.
 
 ## Contributing
 
