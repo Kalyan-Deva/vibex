@@ -28,7 +28,12 @@ pub enum TabHit {
     Close,
     /// Empty bar: drag moves the window, double-click maximizes.
     Drag,
+    /// The classic bar's menu (Session, Actions, Edit, View, Help) by index.
+    Menu(usize),
 }
+
+/// The classic bar's menus.
+pub const MENUS: [&str; 5] = ["Session", "Actions", "Edit", "View", "Help"];
 
 #[derive(Clone, Debug)]
 pub struct TabInfo {
@@ -60,6 +65,13 @@ pub struct TabBar {
     /// Text shown in the drag area (e.g. the active title when there is
     /// only one tab).
     pub caption: Option<String>,
+    /// The classic look: a centred title, round window buttons and a menu
+    /// bar, with tabs below only when there's more than one.
+    pub classic: bool,
+    /// The window's title (the classic bar shows it).
+    pub title: String,
+    /// The classic bar's menu that's open.
+    pub menu_open: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -88,6 +100,9 @@ pub fn height(cell_h: usize, scale: f32) -> f32 {
 /// width tabs from the left, then + and the new-tab menu button, a drag
 /// area, and the window buttons on the right.
 pub fn layout(bar: &TabBar, width: f32, cell_w: usize, cell_h: usize, scale: f32) -> TabBarLayout {
+    if bar.classic {
+        return classic_layout(bar, width, cell_w, cell_h, scale);
+    }
     let _ = cell_w;
     let s = scale.max(0.5);
     let h = height(cell_h, s);
@@ -125,6 +140,76 @@ pub fn layout(bar: &TabBar, width: f32, cell_w: usize, cell_h: usize, scale: f32
     TabBarLayout { height: h, regions }
 }
 
+// the classic bar, at 100%
+const TITLE_H: f32 = 30.0;
+const MENU_H: f32 = 26.0;
+const TABROW_H: f32 = 30.0;
+const DOT: f32 = 16.0;
+const DOT_GAP: f32 = 8.0;
+
+/// The classic bar's three rows at `scale`: title, menus, tabs (0 when
+/// there's one tab).
+pub fn classic_rows(cell_h: usize, scale: f32, tabs_row: bool) -> (f32, f32, f32) {
+    let s = scale.max(0.5);
+    let title = (TITLE_H * s).round().max((cell_h + 8) as f32);
+    let menu = (MENU_H * s).round().max((cell_h + 4) as f32);
+    let tabs = if tabs_row { (TABROW_H * s).round().max((cell_h + 8) as f32) } else { 0.0 };
+    (title, menu, tabs)
+}
+
+/// The classic bar's height.
+pub fn classic_height(cell_h: usize, scale: f32, tabs_row: bool) -> f32 {
+    let (a, b, c) = classic_rows(cell_h, scale, tabs_row);
+    a + b + c
+}
+
+/// Rough width of a menu label in the UI font (layout has no fonts).
+fn label_w(text: &str, s: f32) -> f32 {
+    (text.chars().count() as f32 * 6.4 * s + 9.0 * s).round()
+}
+
+fn classic_layout(bar: &TabBar, width: f32, _cell_w: usize, cell_h: usize, scale: f32) -> TabBarLayout {
+    let s = scale.max(0.5);
+    let (th, mh, tabs_h) = classic_rows(cell_h, s, bar.tabs.len() > 1);
+    let mut regions = Vec::new();
+    // window buttons: dots on the right of the title row
+    if bar.window_buttons {
+        let d = (DOT * s).round();
+        let gap = (DOT_GAP * s).round();
+        let hit = (d + gap).round();
+        let mut x = width - (10.0 * s).round() - d;
+        for h in [TabHit::Close, TabHit::Maximize, TabHit::Minimize] {
+            let cx = x + d / 2.0;
+            regions.push((PxRect { x: (cx - hit / 2.0).round(), y: 0.0, w: hit, h: th }, h));
+            x -= d + gap;
+        }
+    }
+    // the menu bar
+    let mut x = (3.0 * s).round();
+    for (i, m) in MENUS.iter().enumerate() {
+        let w = label_w(m, s);
+        regions.push((PxRect { x, y: th + (2.0 * s).round(), w, h: mh - (4.0 * s).round() }, TabHit::Menu(i)));
+        x += w;
+    }
+    // tabs, when there's more than one: equal widths across the window
+    if tabs_h > 0.0 {
+        let y = th + mh;
+        let n = bar.tabs.len() as f32;
+        let avail = width - (8.0 * s).round() * 2.0 - (NEW_TAB_W * s).round();
+        let tab_w = (avail / n).min(TAB_W * s * 1.2).floor().max(40.0 * s);
+        let mut x = (8.0 * s).round();
+        for i in 0..bar.tabs.len() {
+            let r = PxRect { x, y, w: tab_w, h: tabs_h };
+            let cw = (24.0 * s).round();
+            regions.push((PxRect { x: r.x + r.w - cw - (4.0 * s).round(), y: r.y + 4.0 * s, w: cw, h: r.h - 8.0 * s }, TabHit::CloseTab(i)));
+            regions.push((r, TabHit::Tab(i)));
+            x += tab_w;
+        }
+        regions.push((PxRect { x: x + (4.0 * s).round(), y: y + 3.0 * s, w: (NEW_TAB_W * s).round(), h: tabs_h - 6.0 * s }, TabHit::NewTab));
+    }
+    TabBarLayout { height: th + mh + tabs_h, regions }
+}
+
 impl TabBarLayout {
     /// What is under (x, y)? None below the bar.
     pub fn hit(&self, x: f32, y: f32) -> Option<TabHit> {
@@ -152,7 +237,33 @@ mod tests {
             maximized: false,
             hover: None,
             caption: None,
+            classic: false,
+            title: String::new(),
+            menu_open: None,
         }
+    }
+
+    #[test]
+    fn classic_bar() {
+        let mut b = bar(1);
+        b.classic = true;
+        let l = layout(&b, 1000.0, 9, 19, 1.0);
+        // title + menus, no tabs row with one tab
+        assert_eq!(l.height, 56.0);
+        assert!(l.rect(TabHit::Tab(0)).is_none());
+        assert_eq!(l.hit(1000.0 - 18.0, 15.0), Some(TabHit::Close));
+        assert_eq!(l.hit(500.0, 15.0), Some(TabHit::Drag));
+        let session = l.rect(TabHit::Menu(0)).unwrap();
+        assert_eq!(l.hit(session.x + 4.0, session.y + 4.0), Some(TabHit::Menu(0)));
+        assert!(l.rect(TabHit::Menu(4)).unwrap().x > session.x);
+        // a second tab brings the tabs row
+        let mut b = bar(2);
+        b.classic = true;
+        let l = layout(&b, 1000.0, 9, 19, 1.0);
+        assert_eq!(l.height, 86.0);
+        let t1 = l.rect(TabHit::Tab(1)).unwrap();
+        assert!(t1.y >= 56.0);
+        assert_eq!(classic_height(19, 1.0, true), 86.0);
     }
 
     #[test]

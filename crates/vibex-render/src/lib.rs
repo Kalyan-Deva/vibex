@@ -196,11 +196,15 @@ pub struct Renderer {
     /// Glass look: see-through title and status bars, a faint frosted
     /// sheen and a light edge.
     pub glass: bool,
+    /// The classic title bar (title + menu bar), and whether it shows a
+    /// tabs row (more than one tab).
+    pub classic_bar: bool,
+    pub classic_tabs: bool,
 }
 
 impl Renderer {
     pub fn new(fonts: FontSet, theme: Theme) -> Self {
-        Self { fonts, theme, padding_x: 8, padding_y: 6, status_bar: false, ui_scale: 1.0, glass: false }
+        Self { fonts, theme, padding_x: 8, padding_y: 6, status_bar: false, ui_scale: 1.0, glass: false, classic_bar: false, classic_tabs: false }
     }
 
     /// Height of the status bar in pixels (0 when off).
@@ -213,7 +217,11 @@ impl Renderer {
     }
 
     pub fn tabbar_height(&self) -> f32 {
-        tabbar::height(self.fonts.cell_height, self.ui_scale)
+        if self.classic_bar {
+            tabbar::classic_height(self.fonts.cell_height, self.ui_scale, self.classic_tabs)
+        } else {
+            tabbar::height(self.fonts.cell_height, self.ui_scale)
+        }
     }
 
     /// The area for panes: below the tab bar (if any), above the status bar.
@@ -364,7 +372,11 @@ impl Renderer {
         let mut out = ChromeLayout::default();
         scene::dividers(scene, &self.theme, &chrome.dividers);
         if let Some((bar, layout)) = &chrome.tabbar {
-            scene::tab_bar(scene, &mut self.fonts, &self.theme, cw, ch, bar, layout, self.ui_scale, self.glass);
+            if bar.classic {
+                scene::classic_bar(scene, &mut self.fonts, &self.theme, cw, ch, bar, layout, self.ui_scale, self.glass);
+            } else {
+                scene::tab_bar(scene, &mut self.fonts, &self.theme, cw, ch, bar, layout, self.ui_scale, self.glass);
+            }
         }
         if self.status_bar {
             if let Some(status) = &chrome.status {

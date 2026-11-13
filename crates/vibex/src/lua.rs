@@ -422,6 +422,18 @@ impl Engine {
                 "shell_marks" => c.shell_marks = boolean(&v).map_err(ctx)?,
                 "dim_inactive_panes" => c.dim_inactive_panes = boolean(&v).map_err(ctx)?,
                 "glass" => c.glass = boolean(&v).map_err(ctx)?,
+                "prompt" => {
+                    c.prompt = match string(&v).map_err(ctx)?.as_str() {
+                        p @ ("default" | "dragon") => p.to_string(),
+                        other => return Err(format!("config.prompt: \"{other}\" (use \"default\" or \"dragon\")")),
+                    }
+                }
+                "title_bar" => {
+                    c.title_bar = match string(&v).map_err(ctx)?.as_str() {
+                        t @ ("tabs" | "classic") => t.to_string(),
+                        other => return Err(format!("config.title_bar: \"{other}\" (use \"tabs\" or \"classic\")")),
+                    }
+                }
                 "right_click" => {
                     c.right_click_menu = match string(&v).map_err(ctx)?.as_str() {
                         "menu" => true,

@@ -12,6 +12,36 @@
 if ($env:TERM_PROGRAM -ne 'Vibex' -or $global:__VibexIntegrated) { return }
 $global:__VibexIntegrated = $true
 $global:__VibexLastHistoryId = -1
+
+# config.prompt = "dragon": Kali Linux's two-line prompt, colour for colour
+# (its .bashrc: green lines, bold blue user@host and $, bold path; light
+# blue lines, bold red names and # as Administrator), and the window title
+# user@host: path. Characters are built from codes, so Windows PowerShell
+# reads this file the same with or without a BOM.
+if ($env:VIBEX_PROMPT -eq 'dragon') {
+    function global:__VibexDragonPrompt {
+        $e = [char]27
+        $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $line = if ($admin) { "$e[;94m" } else { "$e[;32m" }
+        $info = if ($admin) { "$e[1;31m" } else { "$e[1;34m" }
+        $sym = if ($admin) { '#' } else { '$' }
+        $user = $env:USERNAME
+        $hn = [System.Net.Dns]::GetHostName()
+        # the path: ~ for home; six or more parts become first\…\last four
+        $loc = $executionContext.SessionState.Path.CurrentLocation
+        $path = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { $loc.Path }
+        $home_ = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath('UserProfile') }
+        if ($path -eq $home_) { $path = '~' }
+        elseif ($path.StartsWith($home_ + '\', [StringComparison]::OrdinalIgnoreCase)) { $path = '~' + $path.Substring($home_.Length) }
+        $parts = @($path -split '\\' | Where-Object { $_ -ne '' })
+        if ($parts.Count -ge 6) { $path = $parts[0] + '\' + [char]0x2026 + '\' + (($parts | Select-Object -Last 4) -join '\') }
+        $h = [char]0x2500
+        $venv = if ($env:VIRTUAL_ENV) { "($e[0;1m$(Split-Path $env:VIRTUAL_ENV -Leaf)$line)" } else { '' }
+        $title = "$e]0;$user@${hn}: $path$([char]7)"
+        "$title$line$([char]0x250C)$h$h$venv($info$user$([char]0x327F)$hn$e[0m$line)-[$e[0;1m$path$e[0m$line]`n$line$([char]0x2514)$h$info$sym$e[0m "
+    }
+    $function:prompt = $function:__VibexDragonPrompt
+}
 $global:__VibexOriginalPrompt = $function:prompt
 
 function global:prompt {
@@ -28,6 +58,13 @@ function global:prompt {
         $global:__VibexLastHistoryId = $last.Id
         $exit = if ($ok) { 0 } elseif ($code) { $code } else { 1 }
         $out += "$esc]133;D;$exit$bel"
+    }
+
+    # Kali's NEWLINE_BEFORE_PROMPT: a blank line before every prompt but
+    # the first (outside the prompt's own marks)
+    if ($env:VIBEX_PROMPT -eq 'dragon') {
+        if ($global:__VibexPromptShown) { $out += "`n" }
+        $global:__VibexPromptShown = $true
     }
 
     # 9;9 — current directory (filesystem locations only)

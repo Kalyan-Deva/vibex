@@ -130,6 +130,9 @@ fn chrome_draws_tabbar_and_palette() {
         maximized: false,
         hover: None,
         caption: None,
+        classic: false,
+        title: String::new(),
+        menu_open: None,
     };
     let layout = r.tabbar_layout(&bar, 800);
     let mut scene = r.begin(800, 400);

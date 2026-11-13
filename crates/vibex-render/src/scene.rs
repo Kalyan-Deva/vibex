@@ -725,6 +725,115 @@ pub(crate) fn fit(fonts: &mut FontSet, cw: usize, text: &str, bold: bool, max: f
     String::new()
 }
 
+/// The classic title bar (QTerminal on Kali): a terminal glyph and the
+/// window title centred on a dark strip, round window buttons (the close
+/// one in the theme's blue), a menu bar, and slim tabs only when there's
+/// more than one.
+#[allow(clippy::too_many_arguments)]
+pub fn classic_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, bar: &TabBar, l: &TabBarLayout, scale: f32, glass: bool) {
+    let s = scale.max(0.5);
+    let width = scene.width as f32;
+    let (th, mh, tabs_h) = crate::tabbar::classic_rows(ch, s, bar.tabs.len() > 1);
+    let bar_bg = blend(theme.background, 0x000000, 46);
+    let alpha = if glass { 120u8 } else { 255u8 };
+    scene.frect(PxRect { x: 0.0, y: 0.0, w: width, h: th + mh }, bar_bg, alpha);
+    let text = theme.strong_text();
+    let dim = blend(bar_bg, theme.foreground, 175);
+
+    // title row: glyph on the left, the title centred
+    let mid = th / 2.0;
+    crate::icons::draw(scene, "terminal", 18.0 * s, mid, 15.0 * s, dim);
+    let title = if bar.title.is_empty() { "Vibex".to_string() } else { bar.title.clone() };
+    let buttons_w = if bar.window_buttons { 3.0 * (16.0 + 8.0) * s + 10.0 * s } else { 0.0 };
+    let room = (width - 2.0 * (buttons_w.max(40.0 * s) + 12.0 * s)).max(40.0 * s);
+    let title = fit(fonts, cw, &title, false, room);
+    let tw = ui_width(fonts, cw, &title, false);
+    ui_text(scene, fonts, ((width - tw) / 2.0).round() as i32, mid, cw, ch, &title, text, false);
+    if let Some(caption) = &bar.caption {
+        let cw_ = ui_width(fonts, cw, caption, false);
+        ui_text(scene, fonts, (width - buttons_w - cw_ - 14.0 * s).round() as i32, mid, cw, ch, caption, theme.palette[1], false);
+    }
+
+    // round window buttons
+    for hit in [TabHit::Minimize, TabHit::Maximize, TabHit::Close] {
+        let Some(r) = l.rect(hit) else { continue };
+        let d = (16.0 * s).round();
+        let c = PxRect { x: (r.x + (r.w - d) / 2.0).round(), y: (mid - d / 2.0).round(), w: d, h: d };
+        let hot = bar.hover == Some(hit);
+        let (fill, mark) = match hit {
+            TabHit::Close => (if hot { blend(theme.palette[4], 0xffffff, 50) } else { theme.palette[4] }, 0x11131a),
+            _ => (if hot { blend(bar_bg, theme.foreground, 70) } else { blend(bar_bg, theme.foreground, 34) }, text),
+        };
+        crate::glass::fill(scene, c, d / 2.0, fill, 255);
+        let (cx, cy) = (c.x + d / 2.0, c.y + d / 2.0);
+        let k = (3.5 * s).round();
+        match hit {
+            TabHit::Close => draw_thin_x(scene, PxRect { x: cx - k - 1.0, y: cy - k - 1.0, w: 2.0 * k + 2.0, h: 2.0 * k + 2.0 }, k, mark),
+            TabHit::Minimize if hot => scene.frect(PxRect { x: cx - k, y: cy, w: 2.0 * k, h: (1.5 * s).round().max(1.0) }, mark, 255),
+            TabHit::Maximize if hot => outline(scene, PxRect { x: cx - k, y: cy - k, w: 2.0 * k, h: 2.0 * k }, mark),
+            _ => {}
+        }
+    }
+
+    // the menu bar
+    let my = th + mh / 2.0;
+    for (i, name) in crate::tabbar::MENUS.iter().enumerate() {
+        let Some(r) = l.rect(TabHit::Menu(i)) else { continue };
+        let open = bar.menu_open == Some(i);
+        if open || bar.hover == Some(TabHit::Menu(i)) {
+            crate::glass::fill(scene, r, 4.0 * s, theme.foreground, if open { 34 } else { 20 });
+        }
+        let w = ui_width(fonts, cw, name, false);
+        ui_text(scene, fonts, (r.x + (r.w - w) / 2.0).round() as i32, my, cw, ch, name, text, false);
+    }
+
+    // tabs, when there's more than one
+    if tabs_h > 0.0 {
+        let y = th + mh;
+        scene.frect(PxRect { x: 0.0, y, w: width, h: tabs_h }, blend(theme.background, 0x000000, 24), alpha);
+        for (i, tab) in bar.tabs.iter().enumerate() {
+            let Some(r) = l.rect(TabHit::Tab(i)) else { continue };
+            let hovered = bar.hover == Some(TabHit::Tab(i)) || bar.hover == Some(TabHit::CloseTab(i));
+            if tab.active {
+                scene.frect(PxRect { x: r.x, y: r.y, w: r.w, h: r.h }, theme.background, 255);
+                scene.frect(PxRect { x: r.x, y: r.y + r.h - (2.0 * s).round(), w: r.w, h: (2.0 * s).round() }, theme.palette[4], 255);
+            } else if hovered {
+                scene.frect(r, blend(theme.background, theme.foreground, 14), 255);
+            }
+            if let Some(c) = tab.color {
+                scene.frect(PxRect { x: r.x, y: r.y, w: r.w, h: (3.0 * s).round() }, c, 255);
+            }
+            let fg = if tab.active { text } else { dim };
+            let close = l.rect(TabHit::CloseTab(i));
+            let right = close.map_or(r.x + r.w - 8.0 * s, |c| c.x) - 4.0 * s;
+            let label = fit(fonts, cw, &tab.title, tab.active, (right - r.x - 12.0 * s).max(0.0));
+            let lw = ui_width(fonts, cw, &label, tab.active);
+            let lx = (r.x + ((right - r.x) - lw).max(12.0 * s) / 2.0).round();
+            ui_text(scene, fonts, lx as i32, r.y + r.h / 2.0, cw, ch, &label, fg, tab.active);
+            if let Some(c) = close {
+                if hovered || tab.active {
+                    draw_thin_x(scene, c, (4.0 * s).round(), dim);
+                }
+            }
+            if i + 1 < bar.tabs.len() && !tab.active && !bar.tabs[i + 1].active {
+                scene.frect(
+                    PxRect { x: (r.x + r.w - 1.0).round(), y: r.y + 7.0 * s, w: 1.0, h: r.h - 14.0 * s },
+                    blend(theme.background, theme.foreground, 40),
+                    255,
+                );
+            }
+        }
+        if let Some(r) = l.rect(TabHit::NewTab) {
+            if bar.hover == Some(TabHit::NewTab) {
+                scene.frect(r, blend(theme.background, theme.foreground, 18), 255);
+            }
+            let (cx, cy, k) = (r.x + r.w / 2.0, r.y + r.h / 2.0, (5.0 * s).round());
+            scene.frect(PxRect { x: cx - k, y: cy.round(), w: 2.0 * k, h: 1.0 }, dim, 255);
+            scene.frect(PxRect { x: cx.round(), y: cy - k, w: 1.0, h: 2.0 * k }, dim, 255);
+        }
+    }
+}
+
 /// Like `fit`, but the ellipsis goes in the middle, so the end (a file name)
 /// stays: `C:\Users\me\…\settings.lua`.
 pub(crate) fn fit_middle(fonts: &mut FontSet, cw: usize, text: &str, bold: bool, max: f32) -> String {

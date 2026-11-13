@@ -2,7 +2,14 @@
 
 ## Unreleased
 
-- **53 themes:** 49 popular schemes (Catppuccin, Dracula, Monokai, Nord, Gruvbox, One Dark, Tomorrow Night, Cobalt2, Synthwave, Zenburn, Campbell, Rosé Pine, Kanagawa, Everforest, GitHub, Solarized, Tokyo Night and more), with proper names and colour swatches in the theme picker, grouped into Vibex, dark and light.
+- **The Kali Linux look:**
+  - Dragon Dark, Kali's QTerminal colours
+  - the Dragon prompt, Kali's two-line `┌──(user㉿host)-[~]` prompt for PowerShell and bash, with Kali's `ls`
+  - a classic title bar: a centred title, round window buttons, a Session · Actions · Edit · View · Help menu bar, and tabs only when there's more than one
+  - all of it with one click: Settings → Appearance → **Style** (*Vibex* or *Dragon (Kali Linux)*), the palette, or `vibex cli style`
+- **Settings:** the prompt, title-bar and weekly editor-update choices were forgotten after a restart; they're saved properly now (with a test that keeps the saved and read lists in sync)
+
+- **54 themes:** 50 popular schemes (Catppuccin, Dracula, Monokai, Nord, Gruvbox, One Dark, Tomorrow Night, Cobalt2, Synthwave, Zenburn, Campbell, Rosé Pine, Kanagawa, Everforest, GitHub, Solarized, Tokyo Night and more), with proper names and colour swatches in the theme picker, grouped into Vibex, dark and light.
 - **Light themes:** the tab bar, Settings, menus and dialogs now read properly on light backgrounds (darker text, deeper accents, readable text on coloured tabs).
 - **Settings:** long paths keep their file name; the theme list opens at the current theme.
 - **Config:** `vibex.lua` and `settings.lua` saved with a byte-order mark (Notepad does this) load fine instead of failing.

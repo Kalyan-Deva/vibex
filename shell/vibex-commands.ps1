@@ -211,7 +211,24 @@ function global:ls {
     # `ls -r` alone is PowerShell's -Recurse (what PowerShell hands type it for)
     $onlyR = @($args | Where-Object { $_ -is [string] -and $_ -match '^-' }) -join ' ' -ceq '-r'
     if ($gnu -and -not $onlyR -and -not $MyInvocation.ExpectingInput -and (__vx_linuxy Get-ChildItem $args)) { & $gnu --color=auto @args; return }
+    # the Dragon (Kali) style: plain `ls` and `ls folder` are Linux's too,
+    # unless a PowerShell parameter is given
+    $psParam = @($args | Where-Object { $_ -is [string] -and $_ -match '^-[A-Za-z]{2,}' }).Count -gt 0
+    if ($gnu -and $env:VIBEX_PROMPT -eq 'dragon' -and -not $MyInvocation.ExpectingInput -and -not $psParam -and -not $onlyR) { & $gnu --color=auto @args; return }
     if ($MyInvocation.ExpectingInput) { $input | Get-ChildItem @args } else { Get-ChildItem @args }
+}
+
+# Kali sorts names the way its en_US.UTF-8 locale does (case doesn't come
+# first: bugbounty before CTF)
+if ($env:VIBEX_PROMPT -eq 'dragon' -and -not $env:LC_ALL -and -not $env:LC_COLLATE) { $env:LC_COLLATE = 'en_US.UTF-8' }
+
+# Kali's ls colours: dircolors' database plus its fix for 777 folders
+if ($env:VIBEX_PROMPT -eq 'dragon' -and -not $env:LS_COLORS) {
+    $dc = __vx_gnu dircolors
+    if ($dc) {
+        $db = (& $dc -b) -join "`n"
+        if ($db -match "LS_COLORS='([^']*)'") { $env:LS_COLORS = $Matches[1].TrimEnd(':') + ':ow=30;44:' }
+    }
 }
 function global:ll { $gnu = __vx_gnu ls; if ($gnu) { & $gnu -lh --color=auto @args } else { Get-ChildItem -Force @args } }
 function global:la { $gnu = __vx_gnu ls; if ($gnu) { & $gnu -lAh --color=auto @args } else { Get-ChildItem -Force @args } }

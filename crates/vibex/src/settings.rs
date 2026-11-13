@@ -56,7 +56,6 @@ pub const KEYS: &[&str] = &[
     "suggestions",
     "linux_commands",
     "editor_updates",
-    "editor_updates",
     "secret_guard",
     "confirm_close",
     "audit_log",
@@ -76,6 +75,8 @@ pub const KEYS: &[&str] = &[
     "scope_guard",
     "collect_loot",
     "right_click",
+    "prompt",
+    "title_bar",
 ];
 
 /// Top-level keys stored as-is (the cursor / scroll ones are nested).
@@ -84,6 +85,7 @@ const FLAT: &[&str] = &[
     "command_history",
     "suggestions",
     "linux_commands",
+    "editor_updates",
     "theme",
     "font_size",
     "opacity",
@@ -112,6 +114,8 @@ const FLAT: &[&str] = &[
     "scope_guard",
     "collect_loot",
     "right_click",
+    "prompt",
+    "title_bar",
 ];
 
 /// A shortcut set in Settings: key and modifiers, or None = no key.
@@ -297,6 +301,8 @@ impl Settings {
                 ("collect_loot", Val::Bool(b)) => c.collect_loot = *b,
                 ("engagement", Val::Str(e)) => c.engagement = (!e.trim().is_empty()).then(|| e.trim().to_string()),
                 ("right_click", Val::Str(m)) => c.right_click_menu = m != "paste",
+                ("prompt", Val::Str(p)) if p == "default" || p == "dragon" => c.prompt = p.clone(),
+                ("title_bar", Val::Str(t)) if t == "tabs" || t == "classic" => c.title_bar = t.clone(),
                 ("update_feed", Val::Str(u)) if (u.is_empty() || u.starts_with("https://")) => {
                     c.update_feed = u.clone();
                 }
@@ -330,6 +336,9 @@ pub enum Change {
     Set(&'static str, Val),
     /// Drop one stored option (back to vibex.lua's value).
     Unset(&'static str),
+    /// A whole look at once: "dragon" (Kali Linux's terminal) or "vibex"
+    /// (drop what a style set, back to vibex.lua).
+    Style(&'static str),
     /// Set (or, with None, remove) the key for an action id.
     Bind(String, KeyOverride),
     /// Drop a shortcut override.
@@ -371,6 +380,51 @@ pub fn bool_of(c: &Config, key: &str) -> bool {
 }
 
 /// Apply `change` to `cfg` and record it in `s`.
+/// What each style sets. "vibex" sets nothing (it clears them all).
+pub const STYLE_KEYS: &[&str] =
+    &["theme", "prompt", "title_bar", "font_family", "font_size", "padding", "opacity", "glass", "shell_marks", "status_bar", "cursor_style"];
+
+/// Kali Linux's QTerminal, from Kali's own configuration: its Kali-Dark
+/// colours, two-line prompt, Fira Code 10 pt, 5 px margin, 5% see-through,
+/// no gutter marks or status bar, a block cursor.
+pub static STYLES: std::sync::LazyLock<Vec<(&'static str, Vec<(&'static str, Val)>)>> = std::sync::LazyLock::new(|| {
+    vec![
+        ("vibex", Vec::new()),
+        (
+            "dragon",
+            vec![
+                ("theme", Val::Str("dragon-dark".into())),
+                ("prompt", Val::Str("dragon".into())),
+                ("title_bar", Val::Str("classic".into())),
+                ("font_family", Val::Str("FiraCode".into())),
+                ("font_size", Val::Num(10.0)),
+                ("padding", Val::Num(5.0)),
+                ("opacity", Val::Num(0.95)),
+                ("glass", Val::Bool(false)),
+                ("shell_marks", Val::Bool(false)),
+                ("status_bar", Val::Bool(false)),
+                ("cursor_style", Val::Str("block".into())),
+            ],
+        ),
+    ]
+});
+
+/// Which style the stored settings are: Some("dragon") when every value of
+/// it is set, Some("vibex") when none of the style keys are.
+pub fn style_of(s: &Settings) -> Option<&'static str> {
+    if STYLE_KEYS.iter().all(|k| !s.values.contains_key(*k)) {
+        return Some("vibex");
+    }
+    STYLES
+        .iter()
+        .find(|(_, vals)| {
+            !vals.is_empty()
+                && vals.iter().all(|(k, v)| s.values.get(*k) == Some(v))
+                && s.values.keys().filter(|k| STYLE_KEYS.contains(&k.as_str())).count() == vals.len()
+        })
+        .map(|(n, _)| *n)
+}
+
 pub fn change(s: &mut Settings, cfg: &mut Config, ch: &Change) {
     match ch {
         Change::Theme(name) => s.set("theme", Val::Str(name.clone())),
@@ -384,6 +438,16 @@ pub fn change(s: &mut Settings, cfg: &mut Config, ch: &Change) {
         Change::Set(key, v) => s.set(key, v.clone()),
         Change::Unset(key) => {
             s.values.remove(*key);
+        }
+        Change::Style(name) => {
+            for key in STYLE_KEYS {
+                s.values.remove(*key);
+            }
+            if let Some((_, values)) = STYLES.iter().find(|(n, _)| n == name) {
+                for (key, v) in values.iter() {
+                    s.set(key, v.clone());
+                }
+            }
         }
         Change::Bind(id, v) => {
             s.keys.insert(id.clone(), v.clone());
@@ -403,6 +467,44 @@ pub fn change(s: &mut Settings, cfg: &mut Config, ch: &Change) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_key_is_stored_once_and_read_back() {
+        // the nested ones (cursor = {...}, scroll = {...}) aside, each key
+        // is in both lists exactly once, so what Settings saves comes back
+        let nested = ["cursor_style", "cursor_blink", "smooth_scroll"];
+        for k in KEYS {
+            assert_eq!(KEYS.iter().filter(|x| *x == k).count(), 1, "{k} twice in KEYS");
+            if !nested.contains(k) {
+                assert_eq!(FLAT.iter().filter(|x| *x == k).count(), 1, "{k} missing from FLAT (or twice)");
+            }
+        }
+    }
+
+    #[test]
+    fn styles_set_and_clear_a_whole_look() {
+        let mut s = Settings::default();
+        let mut c = Config::default();
+        change(&mut s, &mut c, &Change::Theme("nord".into()));
+        assert_eq!(style_of(&s), None);
+        change(&mut s, &mut c, &Change::Style("dragon"));
+        assert_eq!(style_of(&s), Some("dragon"));
+        assert_eq!(c.theme.identify(), Some("dragon-dark"));
+        assert_eq!((c.prompt.as_str(), c.title_bar.as_str()), ("dragon", "classic"));
+        // padding 5 is 5 x 4 (the vertical margin is a little less, as everywhere)
+        assert_eq!((c.font_size_pt, c.padding, c.opacity), (10.0, (5, 4), 0.95));
+        assert!(!c.shell_marks && !c.status_bar);
+        // it survives a save
+        let back = Settings::parse(&s.to_lua()).unwrap();
+        assert_eq!(back.values, s.values, "{}", s.to_lua());
+        assert_eq!(style_of(&back), Some("dragon"));
+        // a change after it makes it custom; "vibex" clears it all
+        change(&mut s, &mut c, &Change::Theme("nord".into()));
+        assert_eq!(style_of(&s), None);
+        change(&mut s, &mut c, &Change::Style("vibex"));
+        assert_eq!(style_of(&s), Some("vibex"));
+        assert!(STYLE_KEYS.iter().all(|k| !s.values.contains_key(*k)));
+    }
 
     #[test]
     fn round_trip_and_apply() {

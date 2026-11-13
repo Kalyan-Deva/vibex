@@ -24,6 +24,8 @@ Unknown options and unknown fields are errors, so typos are caught
 | `theme` | a built-in theme by id or name (`"catppuccin-mocha"` or `"Catppuccin Mocha"`; the list is below), or a table (below) | `"tokyo-night"` |
 | `window` | `{ width, height, padding, opacity, renderer }` | `1100×680`, padding `{x=10,y=8}`, opacity `0.4` (acrylic, same darkness as Windows Terminal's 40%), `"auto"` |
 | `opacity` / `padding` | shortcuts for the `window` fields | |
+| `title_bar` | `"tabs"`: tabs in the title bar, like Windows Terminal. `"classic"`: a centred title, round window buttons and a menu bar (Session, Actions, Edit, View, Help), with tabs below only when there's more than one, like QTerminal on Kali Linux. Also Settings → Appearance | `"tabs"` |
+| `prompt` | `"default"`: the shell's own prompt. `"dragon"`: Kali Linux's two-line `┌──(user㉿host)-[~]` / `└─$` prompt in PowerShell and bash (WSL), with Kali's `ls` (columns, colours, sorting). Also Settings → Terminal | `"default"` |
 | `right_click` | `"menu"`: right-click opens a menu (link actions, copy / paste / select all / find, splits, tabs, the last command, Settings) with each shortcut shown; Shift+right-click works inside mouse apps like vim. `"paste"`: Windows Terminal's copy-if-selected-else-paste | `"menu"` |
 | `glass` | glass look: the desktop shows through blurred and in colour (Windows' acrylic blur-behind, no grey layer), smoky title and status bars, a faint sheen and light edge; stays see-through when the window isn't focused. Also Settings → Appearance → Glass | `false` |
 | `cursor` | `{ style = "block"\|"bar"\|"underline", blink, blink_ms }` | block, blinking, 530 ms |
@@ -57,7 +59,7 @@ status bar, smooth scrolling, prompt marks, dimming, session restore).
 `regular = "C:/path/Font-Regular.ttf"`. Characters a font lacks fall back to
 `fallbacks`, then to Segoe UI Symbol / Emoji / CJK fonts.
 
-**Built-in themes** (Settings → Appearance shows them with their colours): Vibex's own `tokyo-night`, `vibex-night`, `vibex-day`, `vibex-ember`, and `ayu-dark`, `ayu-light`, `ayu-mirage`, `campbell`, `catppuccin-frappe`, `catppuccin-latte`, `catppuccin-macchiato`, `catppuccin-mocha`, `cobalt2`, `dracula`, `everforest-dark`, `everforest-light`, `github-dark`, `github-dark-dimmed`, `github-light`, `gruvbox-dark`, `gruvbox-light`, `gruvbox-material`, `horizon`, `iceberg`, `kanagawa-dragon`, `kanagawa-lotus`, `kanagawa-wave`, `material-ocean`, `monokai`, `moonfly`, `night-owl`, `nightfox`, `nord`, `nord-light`, `one-dark`, `one-half-dark`, `one-half-light`, `one-light`, `oxocarbon`, `palenight`, `poimandres`, `rose-pine`, `rose-pine-dawn`, `rose-pine-moon`, `snazzy`, `solarized-dark`, `solarized-light`, `synthwave`, `tokyo-night-day`, `tokyo-night-moon`, `tokyo-night-storm`, `tomorrow-night`, `zenburn`. A theme's shown name works too: `theme = "Catppuccin Mocha"`.
+**Built-in themes** (Settings → Appearance shows them with their colours): Vibex's own `tokyo-night`, `vibex-night`, `vibex-day`, `vibex-ember`, and `ayu-dark`, `ayu-light`, `ayu-mirage`, `campbell`, `catppuccin-frappe`, `catppuccin-latte`, `catppuccin-macchiato`, `catppuccin-mocha`, `cobalt2`, `dracula`, `dragon-dark`, `everforest-dark`, `everforest-light`, `github-dark`, `github-dark-dimmed`, `github-light`, `gruvbox-dark`, `gruvbox-light`, `gruvbox-material`, `horizon`, `iceberg`, `kanagawa-dragon`, `kanagawa-lotus`, `kanagawa-wave`, `material-ocean`, `monokai`, `moonfly`, `night-owl`, `nightfox`, `nord`, `nord-light`, `one-dark`, `one-half-dark`, `one-half-light`, `one-light`, `oxocarbon`, `palenight`, `poimandres`, `rose-pine`, `rose-pine-dawn`, `rose-pine-moon`, `snazzy`, `solarized-dark`, `solarized-light`, `synthwave`, `tokyo-night-day`, `tokyo-night-moon`, `tokyo-night-storm`, `tomorrow-night`, `zenburn`. A theme's shown name works too: `theme = "Catppuccin Mocha"`.
 
 **Themes.** A table may start from a built-in and override any colour (`"#rrggbb"`):
 
@@ -411,6 +413,35 @@ Image size (the aspect is always kept):
 | `--center` | centred (default: left) |
 
 With no flag it shows at its own size, shrunk to the window's width when wider.
+
+## The Kali Linux look
+
+Vibex can look like Kali Linux's terminal (QTerminal), colour for colour. Everything comes from Kali's own configuration.
+
+**One click:** Settings → Appearance → **Style** → *Dragon (Kali Linux)* sets all of it at once (in settings.lua); *Vibex* takes it all back off. From a script: `vibex cli style dragon` / `vibex cli style vibex`. New tabs get the prompt.
+
+**Or piece by piece**, in vibex.lua:
+
+```lua
+config.theme = "dragon-dark"          -- Kali's Kali-Dark colours
+config.prompt = "dragon"              -- ┌──(user㉿host)-[~]  └─$
+config.title_bar = "classic"          -- title, round buttons, Session · Actions · Edit · View · Help
+config.font = { family = "Fira Code", size = 10 }   -- Kali's font and size
+config.window = { padding = { x = 5, y = 5 }, opacity = 0.95 }   -- its 5 px margin and 5% transparency
+config.shell_marks = false            -- Kali has no gutter marks (command blocks still work)
+config.status_bar = false
+```
+
+- **Dragon Dark** is Kali's 16 colours (from its `kali-themes` package) on the Kali-Dark background (`#23252e`), with white text and a white block cursor.
+- **The Dragon prompt** copies Kali's `.bashrc` and `.zshrc`:
+  - green lines with the user, host and `$` in bold blue, and the path in bold
+  - light blue lines, bold red names and `#` when run as Administrator
+  - `(venv)` when a Python virtual environment is on
+  - long paths shortened to `first\…\last four`
+  - a blank line before every prompt but the first
+  - the window title `user@host: path`
+- **With the Dragon prompt, `ls` is Kali's `ls` in PowerShell:** plain `ls` and `ls folder` print coloured columns, using `dircolors`' database plus Kali's `ow=30;44` and its case-insensitive sorting. Piped `ls` and PowerShell parameters (`ls -Recurse`) still work the PowerShell way.
+- **Fira Code** is free (SIL Open Font License). Put `FiraCode-Regular.ttf` and `FiraCode-Bold.ttf` from [its releases](https://github.com/tonsky/FiraCode/releases) in `%USERPROFILE%\.config\vibex\fonts\`, or install it for Windows.
 
 ## Linux and Windows commands
 

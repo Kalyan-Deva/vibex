@@ -76,6 +76,38 @@ pub enum Field {
     AuditReport,
     /// Right-click: menu or paste (dropdown).
     RightClick,
+    /// A string option with a fixed list of values (dropdown): see `CHOICES`.
+    Pick(&'static str),
+    /// A whole look at once (dropdown): see `settings::STYLES`.
+    Style,
+}
+
+/// The styles as the dropdown shows them: (shown, style).
+pub const STYLE_NAMES: &[(&str, &str)] = &[("Vibex", "vibex"), ("Dragon (Kali Linux)", "dragon")];
+
+fn style_label(style: Option<&str>) -> String {
+    match style {
+        Some(s) => STYLE_NAMES.iter().find(|(_, n)| *n == s).map_or(s.to_string(), |(l, _)| l.to_string()),
+        None => "Custom".to_string(),
+    }
+}
+
+/// String options and their values: (key, [(shown, stored)]).
+pub const CHOICES: &[(&str, &[(&str, &str)])] =
+    &[("prompt", &[("Shell's own", "default"), ("Dragon (Kali)", "dragon")]), ("title_bar", &[("Tabs", "tabs"), ("Classic (Kali)", "classic")])];
+
+fn choice_value(cfg: &Config, key: &str) -> String {
+    match key {
+        "prompt" => cfg.prompt.clone(),
+        "title_bar" => cfg.title_bar.clone(),
+        _ => String::new(),
+    }
+}
+
+/// The shown label of `key`'s current value.
+fn choice_label(cfg: &Config, key: &str) -> String {
+    let v = choice_value(cfg, key);
+    CHOICES.iter().find(|(k, _)| *k == key).and_then(|(_, o)| o.iter().find(|(_, s)| *s == v)).map_or(v.clone(), |(l, _)| l.to_string())
 }
 
 impl Field {
@@ -94,6 +126,7 @@ impl Field {
             Field::UpdateFeed => "update_feed",
             Field::Engagement => "engagement",
             Field::RightClick => "right_click",
+            Field::Pick(k) => k,
             _ => return None,
         })
     }
@@ -147,6 +180,8 @@ pub struct AboutInfo {
 
 #[derive(Default)]
 pub struct SettingsUi {
+    /// The style the stored settings are (for the Style dropdown).
+    pub style_now: Option<&'static str>,
     /// The Settings tab exists.
     pub open: bool,
     /// It's the tab being shown.
@@ -330,6 +365,12 @@ impl SettingsUi {
         let mut note = String::from("Changes here are saved in settings.lua and override vibex.lua.");
         match self.page() {
             Page::Appearance => {
+                self.style_now = crate::settings::style_of(settings);
+                push!(
+                    Field::Style,
+                    SettingRow::new("Style", Control::Choice(style_label(self.style_now)))
+                        .detail("One look for everything: colours, prompt, title bar, font and spacing"),
+                );
                 push!(Field::Header, header("Colours"));
                 let theme_name = cfg.theme.identify().map_or("Custom (vibex.lua)".to_string(), Theme::title);
                 let mut theme = SettingRow::new("Theme", Control::Choice(theme_name)).detail("Colours for text, background and cursor");
@@ -353,6 +394,11 @@ impl SettingsUi {
                 );
                 let (f, r) = toggle("Glass", "See-through, frosted look over the blur (off = Windows Terminal's)", "glass");
                 push!(f, r);
+                push!(
+                    Field::Pick("title_bar"),
+                    SettingRow::new("Title bar", Control::Choice(choice_label(cfg, "title_bar")))
+                        .detail("Tabs up top (Windows Terminal), or a title and menu bar with tabs only when there are two or more (Kali's QTerminal)"),
+                );
                 push!(Field::Padding, SettingRow::new("Padding", Control::Choice(format!("{} px", cfg.padding.0))).detail("Space around the text"));
                 let (f, r) = toggle("Status bar", "Profile, folder and exit code along the bottom", "status_bar");
                 push!(f, r);
@@ -384,6 +430,11 @@ impl SettingsUi {
                     "linux_commands",
                 );
                 push!(f, r);
+                push!(
+                    Field::Pick("prompt"),
+                    SettingRow::new("Prompt", Control::Choice(choice_label(cfg, "prompt")))
+                        .detail("Dragon: Kali Linux's two-line user@host prompt and its ls, in PowerShell and WSL (new tabs)"),
+                );
                 let rc = if cfg.right_click_menu { "Menu" } else { "Copy / paste" };
                 push!(
                     Field::RightClick,
@@ -682,7 +733,9 @@ impl SettingsUi {
             | Field::Scrollback
             | Field::DefaultProfile
             | Field::Engagement
-            | Field::RightClick => Effect::Dropdown(i),
+            | Field::RightClick
+            | Field::Style
+            | Field::Pick(_) => Effect::Dropdown(i),
             Field::NewEngagement => {
                 self.editing = Some(String::new());
                 Effect::Redraw
@@ -752,7 +805,7 @@ impl SettingsUi {
                 Change::Set("default_profile", Val::Str(cycle(&names, &cfg.default_profile, dir)))
             }
             Field::Bool(k) => Change::Toggle(k),
-            Field::Engagement | Field::RightClick => {
+            Field::Engagement | Field::RightClick | Field::Pick(_) | Field::Style => {
                 let Some((opts, cur)) = self.options(i, cfg) else { return Effect::None };
                 let n = opts.len() as i32;
                 return opts.into_iter().nth(((cur as i32 + dir).rem_euclid(n.max(1))) as usize).map_or(Effect::None, |(_, c)| Effect::Change(c));
@@ -798,6 +851,15 @@ impl SettingsUi {
                 }
                 let cur = cfg.engagement.clone().unwrap_or_else(|| "Off".into());
                 pick(list, &cur)
+            }
+            Field::Style => {
+                let list = STYLE_NAMES.iter().map(|(label, n)| (label.to_string(), Change::Style(n))).collect();
+                pick(list, &style_label(self.style_now))
+            }
+            Field::Pick(key) => {
+                let (_, opts) = CHOICES.iter().find(|(k, _)| k == key)?;
+                let list = opts.iter().map(|(label, v)| (label.to_string(), Change::Set(key, Val::Str(v.to_string())))).collect();
+                pick(list, &choice_label(cfg, key))
             }
             Field::RightClick => pick(
                 vec![
@@ -924,7 +986,8 @@ mod tests {
         ui.move_focus(1);
         let f = ui.focus.unwrap();
         assert!(ui.fields[f].focusable());
-        assert_eq!(ui.fields[0], Field::Header);
+        // Appearance opens with the Style row, then its first heading
+        assert_eq!((&ui.fields[0], &ui.fields[1]), (&Field::Style, &Field::Header));
     }
 
     #[test]

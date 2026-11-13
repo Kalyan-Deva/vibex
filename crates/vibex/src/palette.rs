@@ -177,6 +177,9 @@ fn setting_entries(cfg: &Config) -> Vec<Entry> {
     let mut push = |label: String, hint: String, change: Change| {
         out.push(Entry { label: format!("Settings: {label}"), hint, command: Command::Setting(change) });
     };
+    for (label, name) in crate::settings_ui::STYLE_NAMES {
+        push(format!("style {label}"), String::new(), Change::Style(name));
+    }
     let now = cfg.theme.identify();
     for id in Theme::ids() {
         push(format!("theme {}", Theme::title(id)), mark(now == Some(id)), Change::Theme(id.to_string()));

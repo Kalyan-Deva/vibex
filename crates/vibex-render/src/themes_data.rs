@@ -137,6 +137,18 @@ pub(crate) const SCHEMES: &[Scheme] = &[
         ],
     },
     Scheme {
+        id: "dragon-dark",
+        name: "Dragon Dark",
+        background: 0x23252e,
+        foreground: 0xffffff,
+        cursor: 0xffffff,
+        selection: 0x41465a,
+        palette: [
+            0x1f2229, 0xd41919, 0x5ebdab, 0xfea44c, 0x367bf0, 0x9755b3, 0x49aee6, 0xe6e6e6, 0x198388, 0xec0101, 0x47d4b9, 0xff8a18, 0x277fff, 0x962ac3,
+            0x05a1f7, 0xffffff,
+        ],
+    },
+    Scheme {
         id: "everforest-dark",
         name: "Everforest Dark",
         background: 0x232a2e,

@@ -20,6 +20,26 @@ if [ "$TERM_PROGRAM" = "Vibex" ] && [ -z "$__VIBEX_INTEGRATED" ]; then
     *) PROMPT_COMMAND="__vibex_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
   esac
 
+  # config.prompt = "dragon": Kali Linux's two-line prompt (its .bashrc,
+  # colour for colour), the title user@host: dir, and a blank line before
+  # every prompt but the first
+  if [ "$VIBEX_PROMPT" = dragon ]; then
+    __vibex_pc='\[\033[;32m\]'
+    __vibex_ic='\[\033[1;34m\]'
+    if [ "$EUID" -eq 0 ]; then
+      __vibex_pc='\[\033[;94m\]'
+      __vibex_ic='\[\033[1;31m\]'
+    fi
+    VIRTUAL_ENV_DISABLE_PROMPT=1
+    PS1='\[\e]0;\u@\h: \w\a\]'$__vibex_pc'┌──${VIRTUAL_ENV:+(\[\033[0;1m\]$(basename $VIRTUAL_ENV)'$__vibex_pc')}('$__vibex_ic'\u㉿\h'$__vibex_pc')-[\[\033[0;1m\]\w'$__vibex_pc']\n'$__vibex_pc'└─'$__vibex_ic'\$\[\033[0m\] '
+    unset __vibex_pc __vibex_ic
+    __vibex_gap() {
+      if [ -n "$__VIBEX_PROMPT_SHOWN" ]; then echo; fi
+      __VIBEX_PROMPT_SHOWN=1
+    }
+    PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}__vibex_gap"
+  fi
+
   # mark the prompt start and end (\[ \] keep bash's line-length maths
   # right); PS0 prints when a command starts, so output begins there
   PS1='\[\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'

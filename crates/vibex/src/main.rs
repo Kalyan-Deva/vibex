@@ -309,6 +309,8 @@ struct Session {
     toast: Option<(String, Instant)>,
     /// Lines waiting in the format menu.
     export_job: Option<export_ui::ExportJob>,
+    /// Which classic-bar menu is open (with `menu`).
+    classic_menu: Option<usize>,
     /// "Mark start": where some lines to save begin.
     mark: Option<export_ui::LineMark>,
     status: Option<StatusLine>,
@@ -526,6 +528,7 @@ const CLI_USAGE: &str = "usage: vibex cli COMMAND [options]   (needs config.remo
   enter [--pane N]                      press Enter (asks first for dangerous commands, like the keyboard)
   notes [--pane N] TEXT                 add a line to the pane's notes panel
   dialog [--answer yes|no]              the open question, and answer it
+  style vibex|dragon                    a whole look (Settings → Appearance → Style); dragon = Kali Linux's
   prompt [--pane N]                     what's typed at the prompt, and the suggestion
   play FILE.cast                        replay a recording in a new tab
   engagement start NAME [--scope S] | stop | scope S | status | report
@@ -1357,6 +1360,16 @@ impl App {
                     s.settings_ui.show(words.first().and_then(|p| settings_ui::Page::named(p)));
                     Ok(String::new())
                 }
+                "style" => {
+                    let w = window.ok_or("error: no window open")?;
+                    let want = words.first().cloned().unwrap_or_default();
+                    let Some((_, name)) = settings_ui::STYLE_NAMES.iter().find(|(_, n)| *n == want) else {
+                        let all: Vec<&str> = settings_ui::STYLE_NAMES.iter().map(|(_, n)| *n).collect();
+                        return Err(format!("error: style '{want}'? (one of: {})", all.join(", ")));
+                    };
+                    self.sessions.get_mut(&w).unwrap().apply_setting(settings::Change::Style(name));
+                    Ok(String::new())
+                }
                 other => Err(format!("error: unknown command '{other}' (vibex cli help)")),
             }
         })();
@@ -1603,6 +1616,7 @@ impl App {
         renderer.padding_y = cfg.padding.1;
         renderer.status_bar = cfg.status_bar;
         renderer.glass = cfg.glass;
+        renderer.classic_bar = cfg.title_bar == "classic";
         renderer.ui_scale = window.scale_factor() as f32;
 
         let blink_interval = Duration::from_millis(cfg.blink_interval_ms);
@@ -1652,6 +1666,7 @@ impl App {
             config_error: startup.error,
             toast: None,
             export_job: None,
+            classic_menu: None,
             mark: None,
             status: None,
             next_status: now,
@@ -1914,7 +1929,7 @@ impl Session {
         self.next_pane = id + 1;
         let mut cmd = cmd;
         cmd.env.push(("VIBEX_PANE".into(), id.to_string()));
-        commands::prepare(&mut cmd, self.config.linux_commands);
+        commands::prepare_with(&mut cmd, self.config.linux_commands, &self.config.prompt);
         let proxy = self.proxy.clone();
         let pane = Pane::spawn(id, &p.name, &cmd, cols, rows, &self.pane_options(), move || {
             let _ = proxy.send_event(AppEvent::Pty);
@@ -2289,7 +2304,7 @@ impl Session {
         if self.focus_mode || (self.fullscreen && self.tabs.len() <= 1) {
             return false;
         }
-        if self.custom_chrome {
+        if self.custom_chrome || self.config.title_bar == "classic" {
             return true;
         }
         match self.config.tab_bar {
@@ -2333,12 +2348,16 @@ impl Session {
                 }
             })
             .collect::<Vec<_>>();
+        let classic = self.config.title_bar == "classic";
         TabBar {
             tabs,
             window_buttons: self.custom_chrome && !self.fullscreen,
             maximized: self.window.is_maximized(),
             hover: self.tab_hover,
             caption: self.eng.as_ref().map(|e| format!("\u{25cf} engagement: {}", e.name)),
+            classic,
+            title: if classic { self.panes.get(&self.active_id()).map(|p| p.title()).unwrap_or_default() } else { String::new() },
+            menu_open: self.classic_menu.filter(|_| self.menu.is_some()),
         }
     }
 
@@ -2355,6 +2374,7 @@ impl Session {
             self.restored_size = Some((w as f64 / scale, h as f64 / scale));
         }
         let show_bar = self.tabbar_visible();
+        self.renderer.classic_tabs = self.tabs.len() > 1;
         self.tabbar = if show_bar {
             let model = self.tab_bar_model();
             self.renderer.tabbar_layout(&model, w)
@@ -3222,6 +3242,7 @@ impl Session {
                 }
             }
             (TabHit::NewTab, MouseButton::Right) | (TabHit::NewTabMenu, _) => self.open_menu(),
+            (TabHit::Menu(i), _) => self.open_classic_menu(i),
             (TabHit::Minimize, MouseButton::Left) => self.window.set_minimized(true),
             (TabHit::Maximize, MouseButton::Left) => self.toggle_maximize(),
             (TabHit::Close, MouseButton::Left) => self.request_close_window(),
@@ -3241,8 +3262,72 @@ impl Session {
         self.window.request_redraw();
     }
 
+    /// The classic bar's menus (QTerminal's Session, Actions, Edit, View,
+    /// Help), each item with its shortcut.
+    fn open_classic_menu(&mut self, i: usize) {
+        let Some(r) = self.tabbar.rect(TabHit::Menu(i)) else { return };
+        let hint = |a: &Action| self.config.bindings.iter().find(|b| &b.action == a).map(|b| b.describe()).unwrap_or_default();
+        // (label, action, separator above)
+        let list: Vec<(&str, Action, bool)> = match i {
+            0 => vec![
+                ("New tab", Action::NewTab(None), false),
+                ("New window", Action::SpawnWindow(None), false),
+                ("Split right", Action::SplitRight(None), true),
+                ("Split down", Action::SplitDown(None), false),
+                ("Close pane", Action::ClosePane, true),
+                ("Close tab", Action::CloseTab, false),
+                ("Reopen closed tab", Action::ReopenClosedTab, false),
+                ("Detach window", Action::DetachWindow, true),
+                ("Quit", Action::QuitAll, false),
+            ],
+            1 => vec![
+                ("Command palette", Action::CommandPalette, false),
+                ("Search history", Action::HistorySearch, false),
+                ("Quick select", Action::QuickSelect, false),
+                ("Copy mode", Action::CopyMode, false),
+                ("Type into every pane", Action::ToggleBroadcast, false),
+                ("Screenshot the pane", Action::ScreenshotPane, true),
+                ("Screenshot the last command", Action::ScreenshotCommand, false),
+                ("Save lines as\u{2026}", Action::SaveRange, false),
+                ("Record the pane", Action::ToggleRecording, false),
+                ("Clear scrollback", Action::ClearScrollback, true),
+            ],
+            2 => vec![
+                ("Copy", Action::Copy, false),
+                ("Paste", Action::Paste, false),
+                ("Select all", Action::SelectAll, false),
+                ("Find", Action::Search, true),
+                ("Copy the last output", Action::CopyLastOutput, false),
+            ],
+            3 => vec![
+                ("Fullscreen", Action::ToggleFullscreen, false),
+                ("Focus mode", Action::ToggleFocusMode, false),
+                ("Zoom pane", Action::TogglePaneZoom, false),
+                ("Bigger text", Action::IncreaseFontSize, true),
+                ("Smaller text", Action::DecreaseFontSize, false),
+                ("Reset text size", Action::ResetFontSize, false),
+                ("Floating pane", Action::ToggleFloatingPane, true),
+                ("Notes beside the pane", Action::ToggleNotes, false),
+                ("Settings", Action::OpenSettings(None), true),
+            ],
+            _ => vec![
+                ("Shortcuts", Action::OpenSettings(Some("shortcuts".into())), false),
+                ("Check for updates", Action::CheckForUpdates, false),
+                ("About Vibex", Action::OpenSettings(Some("about".into())), true),
+            ],
+        };
+        let mut items: Vec<(MenuItem, MenuCmd)> =
+            list.into_iter().map(|(label, a, sep)| (MenuItem { label: label.into(), hint: hint(&a), separator: sep, icon: None }, MenuCmd::Act(a))).collect();
+        with_icons(&mut items);
+        self.classic_menu = Some(i);
+        self.menu = Some(Menu { items, typing: false, first: 0, min_width: 220.0 * self.renderer.ui_scale, selected: None, x: r.x, y: r.y + r.h + 2.0 });
+        self.palette = None;
+        self.window.request_redraw();
+    }
+
     /// The ⌄ menu: profiles, then Settings, the palette and About.
     fn open_menu(&mut self) {
+        self.classic_menu = None;
         let Some(r) = self.tabbar.rect(TabHit::NewTabMenu) else { return };
         let hint = |a: &Action| self.config.bindings.iter().find(|b| &b.action == a).map(|b| b.describe()).unwrap_or_default();
         let mut items: Vec<(MenuItem, MenuCmd)> = Vec::new();
@@ -3274,6 +3359,7 @@ impl Session {
     /// any), clipboard, splits and tabs, the last command, then Settings.
     /// Each item shows its shortcut.
     fn open_context_menu(&mut self, x: f64, y: f64) {
+        self.classic_menu = None;
         let hint = |a: &Action| self.config.bindings.iter().find(|b| &b.action == a).map(|b| b.describe()).unwrap_or_default();
         let item = |label: &str, a: Action, sep: bool| (MenuItem { label: label.into(), hint: hint(&a), separator: sep, icon: None }, MenuCmd::Act(a));
         let mut items: Vec<(MenuItem, MenuCmd)> = Vec::new();
@@ -4474,6 +4560,7 @@ impl Session {
 
     /// A Settings dropdown under its box.
     fn open_dropdown(&mut self, i: usize) {
+        self.classic_menu = None;
         let cfg = self.config.clone();
         let Some((opts, cur)) = self.settings_ui.options(i, &cfg) else { return };
         let rect = self.chrome_layout.settings.as_ref().and_then(|l| l.regions.iter().find(|(_, h)| *h == SettingsHit::Control(i)).map(|(r, _)| *r));
@@ -5405,6 +5492,28 @@ impl Session {
             self.toast("settings reset to vibex.lua", 2.5);
             return;
         }
+        // a style sets or clears many options: save, then reload so cleared
+        // ones go back to vibex.lua's values
+        if let settings::Change::Style(name) = change {
+            let mut cfg = self.config.clone();
+            settings::change(&mut self.settings, &mut cfg, &change);
+            if let Err(e) = self.settings.save(&path) {
+                self.toast(format!("couldn't save settings: {e}"), 4.0);
+                return;
+            }
+            self.reload_config(false);
+            let font_missing = name == "dragon" && config::resolve_family("FiraCode").is_none();
+            let msg = match name {
+                "dragon" if font_missing => {
+                    "style: Dragon (Kali Linux). Its font, Fira Code, isn't installed: get it from github.com/tonsky/FiraCode (new tabs get the prompt)"
+                        .to_string()
+                }
+                "dragon" => "style: Dragon (Kali Linux); new tabs get its prompt".to_string(),
+                _ => "style: Vibex (back to vibex.lua)".to_string(),
+            };
+            self.toast(msg, if font_missing { 7.0 } else { 3.0 });
+            return;
+        }
         let mut cfg = self.config.clone();
         settings::change(&mut self.settings, &mut cfg, &change);
         self.apply_config(cfg);
@@ -5473,6 +5582,7 @@ impl Session {
             enable_backdrop(&self.window, cfg.glass);
         }
         self.renderer.glass = cfg.glass;
+        self.renderer.classic_bar = cfg.title_bar == "classic";
         if cfg.opacity != self.opacity {
             self.set_opacity(cfg.opacity);
         }
@@ -6117,6 +6227,7 @@ fn render_preview(out: &std::path::Path, cfg: &Config, engine: &Engine, profile:
     r.padding_y = cfg.padding.1;
     r.status_bar = cfg.status_bar;
     r.glass = cfg.glass;
+    r.classic_bar = cfg.title_bar == "classic";
     // VIBEX_PREVIEW_SCALE=1.25 previews the title bar at 125% display scaling
     r.ui_scale = std::env::var("VIBEX_PREVIEW_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let settings_page = std::env::var("VIBEX_PREVIEW_SETTINGS").ok();
@@ -6136,7 +6247,15 @@ fn render_preview(out: &std::path::Path, cfg: &Config, engine: &Engine, profile:
         maximized: false,
         hover: Some(TabHit::NewTab),
         caption: None,
+        classic: cfg.title_bar == "classic",
+        title: "dev@vibex: ~".into(),
+        menu_open: None,
     };
+    // VIBEX_PREVIEW_TABS=1: just the first tab (the classic bar then has no tabs row)
+    if std::env::var("VIBEX_PREVIEW_TABS").ok().as_deref() == Some("1") {
+        bar.tabs.truncate(1);
+    }
+    r.classic_tabs = bar.tabs.len() > 1;
     if settings_page.is_some() {
         bar.hover = None;
     }

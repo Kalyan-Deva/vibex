@@ -50,7 +50,15 @@ fn is_program(cmd: &Command, name: &str) -> bool {
 }
 
 /// Add what the shell scripts need to a shell about to start.
+#[cfg(test)]
 pub fn prepare(cmd: &mut Command, on: bool) {
+    prepare_with(cmd, on, "default")
+}
+
+/// `prepare`, plus the prompt style the shell scripts should set
+/// (`config.prompt`: "dragon" is Kali Linux's two-line prompt).
+pub fn prepare_with(cmd: &mut Command, on: bool, prompt: &str) {
+    cmd.env.push(("VIBEX_PROMPT".into(), prompt.into()));
     // the bundled nano and Neovim: after everything else on PATH, so an
     // editor installed separately still wins
     let extra = crate::bundle::path_dirs();
@@ -67,8 +75,11 @@ pub fn prepare(cmd: &mut Command, on: bool) {
     cmd.env.push(("VIBEX_COMMANDS".into(), if on { "1" } else { "0" }.into()));
     // into WSL too
     if let Some((_, v)) = cmd.env.iter_mut().find(|(k, _)| k == "WSLENV") {
-        if !v.split(':').any(|p| p == "VIBEX_COMMANDS") {
-            v.push_str(":VIBEX_COMMANDS");
+        for name in ["VIBEX_COMMANDS", "VIBEX_PROMPT"] {
+            if !v.split(':').any(|p| p == name) {
+                v.push(':');
+                v.push_str(name);
+            }
         }
     }
     if !on {
@@ -219,6 +230,6 @@ mod tests {
         c.env.push(("WSLENV".into(), "TERM_PROGRAM:VIBEX_EXE/p".into()));
         prepare(&mut c, true);
         let w = &c.env.iter().find(|(k, _)| k == "WSLENV").unwrap().1;
-        assert_eq!(w, "TERM_PROGRAM:VIBEX_EXE/p:VIBEX_COMMANDS");
+        assert_eq!(w, "TERM_PROGRAM:VIBEX_EXE/p:VIBEX_COMMANDS:VIBEX_PROMPT");
     }
 }

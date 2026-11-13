@@ -153,6 +153,13 @@ pub struct Config {
     /// Right-click in the terminal: a menu, or Windows Terminal's
     /// copy-if-selected-else-paste.
     pub right_click_menu: bool,
+    /// The shell prompt Vibex's shell scripts set: "default" (the shell's
+    /// own) or "dragon" (Kali Linux's two-line prompt).
+    pub prompt: String,
+    /// The window's top: "tabs" (tabs in the title bar, like Windows
+    /// Terminal) or "classic" (a title, a menu bar, and tabs only when
+    /// there's more than one, like QTerminal on Kali).
+    pub title_bar: String,
     pub renderer: RendererKind,
     pub smooth_scroll: bool,
     pub status_bar: bool,
@@ -251,6 +258,8 @@ impl Default for Config {
             status_bar: false,
             glass: false,
             right_click_menu: true,
+            prompt: "default".into(),
+            title_bar: "tabs".into(),
             leader: None,
             bindings: default_bindings(),
             decorations: Decorations::Vibex,
