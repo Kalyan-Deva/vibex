@@ -955,8 +955,10 @@ mod tests {
 
     #[test]
     fn family_names() {
-        assert_eq!(family_of(r"C:\x\PlemolJPConsoleNF-Regular.ttf"), "PlemolJPConsoleNF");
-        assert_eq!(family_of(r"C:\Windows\Fonts\consola.ttf"), "Consolas");
+        // build paths with this platform's separator so the test runs everywhere
+        let p = |file: &str| std::path::Path::new("fonts").join(file).to_string_lossy().into_owned();
+        assert_eq!(family_of(&p("PlemolJPConsoleNF-Regular.ttf")), "PlemolJPConsoleNF");
+        assert_eq!(family_of(&p("consola.ttf")), "Consolas");
         assert_eq!(pretty_family("PlemolJPConsoleNF"), "PlemolJP Console NF");
         assert_eq!(pretty_family("CascadiaCode"), "Cascadia Code");
         assert_eq!(pretty_family("Courier New"), "Courier New");
