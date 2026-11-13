@@ -1,6 +1,6 @@
 //! One process, many windows, and remote control.
 //!
-//! The first Vibex owns a named pipe. Later launches (Start menu, Win+R,
+//! The first Vibex owns a named pipe (a Unix socket on Linux and macOS). Later launches (Start menu, Win+R,
 //! Explorer's "Open in Vibex", `vibex -- cmd`) connect to it, hand over
 //! what they were asked to open and exit; the first process opens a new
 //! window. `--new-process` (or `--config`) skips the handoff. `vibex cli
@@ -17,7 +17,7 @@
 
 // The handoff is Windows-only for now; elsewhere each launch is its own
 // process (the request type still compiles for tests).
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(any(windows, unix)), allow(dead_code))]
 
 use std::path::PathBuf;
 
@@ -326,17 +326,140 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{forward, send, serve};
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+mod imp {
+    use super::{OpenRequest, Request, MAX_REQUEST};
+    use std::io::{Read, Write};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    /// VIBEX_INSTANCE: run a separate Vibex with its own socket (tests).
+    fn instance() -> String {
+        std::env::var("VIBEX_INSTANCE").map(|i| format!("-{i}")).unwrap_or_default()
+    }
+
+    fn my_uid() -> u32 {
+        std::fs::metadata("/proc/self").or_else(|_| std::fs::metadata("/")).map(|m| m.uid()).unwrap_or(0)
+    }
+
+    /// `$XDG_RUNTIME_DIR/vibex<tag>.sock`, or a private `/tmp/vibex-<uid>/`
+    /// directory when there's no runtime dir.
+    pub(super) fn socket_path(tag: &str) -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_absolute() && d.is_dir()) {
+            return Some(dir.join(format!("vibex{tag}.sock")));
+        }
+        let uid = my_uid();
+        let dir = PathBuf::from(format!("/tmp/vibex-{uid}"));
+        if let Err(e) = std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return None;
+            }
+        }
+        // someone else's directory (or a symlink to one) is not ours to use
+        let meta = std::fs::symlink_metadata(&dir).ok()?;
+        if !meta.is_dir() || meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
+            return None;
+        }
+        Some(dir.join(format!("vibex{tag}.sock")))
+    }
+
+    /// Read one framed request: "<len>\n<payload>".
+    fn read_request(s: &mut UnixStream) -> Option<String> {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            if s.read(&mut byte).ok()? == 0 {
+                return None;
+            }
+            if byte[0] == b'\n' {
+                break;
+            }
+            head.push(byte[0]);
+            if head.len() > 12 {
+                return None;
+            }
+        }
+        let len: usize = std::str::from_utf8(&head).ok()?.parse().ok()?;
+        if len > MAX_REQUEST {
+            return None;
+        }
+        let mut data = vec![0u8; len];
+        s.read_exact(&mut data).ok()?;
+        String::from_utf8(data).ok()
+    }
+
+    pub(super) fn send_to(path: &std::path::Path, req: &Request) -> Option<String> {
+        let mut s = UnixStream::connect(path).ok()?;
+        let payload = req.encode();
+        s.write_all(format!("{}\n{payload}", payload.len()).as_bytes()).ok()?;
+        let _ = s.shutdown(std::net::Shutdown::Write);
+        // remote control may take a moment, so no read timeout
+        let mut reply = Vec::new();
+        s.take(64 * 1024 * 1024).read_to_end(&mut reply).ok()?;
+        Some(String::from_utf8_lossy(&reply).into_owned())
+    }
+
+    /// Send a request to the running Vibex and wait for its reply. None if
+    /// no Vibex is running.
+    pub fn send(req: &Request) -> Option<String> {
+        send_to(&socket_path(&instance())?, req)
+    }
+
+    /// Hand a window request to a running Vibex. True if it took it.
+    pub fn forward(req: &OpenRequest) -> bool {
+        send(&Request::Open(req.clone())).is_some()
+    }
+
+    /// Become the instance others talk to; `handle` turns each request
+    /// into the reply. False if another process already is.
+    pub fn serve(handle: impl Fn(Request) -> String + Send + 'static) -> bool {
+        match socket_path(&instance()) {
+            Some(p) => serve_on(&p, handle),
+            None => false,
+        }
+    }
+
+    pub(super) fn serve_on(path: &std::path::Path, handle: impl Fn(Request) -> String + Send + 'static) -> bool {
+        // a live socket means another Vibex owns the name; a dead one is stale
+        if UnixStream::connect(path).is_ok() {
+            return false;
+        }
+        let _ = std::fs::remove_file(path);
+        let Ok(listener) = UnixListener::bind(path) else { return false };
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        std::thread::Builder::new()
+            .name("vibex-single-instance".into())
+            .spawn(move || {
+                for conn in listener.incoming() {
+                    let Ok(mut s) = conn else { continue };
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+                    let reply = match read_request(&mut s).as_deref().and_then(Request::decode) {
+                        Some(req) => handle(req),
+                        None => "error: bad request".into(),
+                    };
+                    let _ = s.write_all(reply.as_bytes());
+                }
+            })
+            .is_ok()
+    }
+}
+
+#[cfg(unix)]
+pub use imp::{forward, send, serve};
+
+#[cfg(not(any(windows, unix)))]
 pub fn forward(_req: &OpenRequest) -> bool {
     false
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 pub fn send(_req: &Request) -> Option<String> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 pub fn serve(_handle: impl Fn(Request) -> String + Send + 'static) -> bool {
     false
 }
@@ -391,5 +514,37 @@ mod tests {
         let reply = imp::send_to(&name, &Request::Cli(vec!["list".into(), big.clone()])).unwrap();
         assert_eq!(reply.len(), "echo list ".len() + big.len(), "large payloads both ways");
         assert!(imp::send_to(&imp::name("-nobody-listens"), &Request::Cli(vec![])).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn requests_and_replies_over_the_socket() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("vibex-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("single.sock");
+        let (tx, rx) = mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        assert!(imp::serve_on(&path, move |r| {
+            let reply = match &r {
+                Request::Cli(a) => format!("echo {}", a.join(" ")),
+                Request::Open(_) => "ok".into(),
+            };
+            tx.lock().unwrap().send(r).unwrap();
+            reply
+        }));
+        // a second server on the same name is refused
+        assert!(!imp::serve_on(&path, |_| String::new()));
+        for i in 0..3 {
+            let req = Request::Open(OpenRequest { profile: Some(format!("p{i}")), ..Default::default() });
+            assert_eq!(imp::send_to(&path, &req).as_deref(), Some("ok"), "send {i}");
+            assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), req);
+        }
+        let big = "x".repeat(200_000);
+        let reply = imp::send_to(&path, &Request::Cli(vec!["list".into(), big.clone()])).unwrap();
+        assert_eq!(reply.len(), "echo list ".len() + big.len(), "large payloads both ways");
+        assert!(imp::send_to(&dir.join("nobody.sock"), &Request::Cli(vec![])).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
