@@ -54,10 +54,55 @@ impl Theme {
         }
     }
 
-    pub const BUILTIN: &'static [&'static str] = &["tokyo-night", "vibex-night", "vibex-day", "vibex-ember"];
+    /// Vibex's own themes (the rest come from `themes_data`).
+    pub const OWN: &'static [&'static str] = &["tokyo-night", "vibex-night", "vibex-day", "vibex-ember"];
 
-    /// A built-in theme by name.
+    /// Every built-in theme id: Vibex's own, then the others by name.
+    pub fn ids() -> Vec<&'static str> {
+        Self::OWN.iter().copied().chain(crate::themes_data::SCHEMES.iter().map(|s| s.id)).collect()
+    }
+
+    /// The name to show for a theme id ("tokyo-night" -> "Tokyo Night").
+    pub fn title(id: &str) -> String {
+        match id {
+            "tokyo-night" => "Tokyo Night".into(),
+            "vibex-night" => "Vibex Night".into(),
+            "vibex-day" => "Vibex Day".into(),
+            "vibex-ember" => "Vibex Ember".into(),
+            _ => crate::themes_data::SCHEMES.iter().find(|s| s.id == id).map_or_else(|| id.to_string(), |s| s.name.to_string()),
+        }
+    }
+
+    /// Which built-in theme this is (all colours equal), if any.
+    pub fn identify(&self) -> Option<&'static str> {
+        Self::ids()
+            .into_iter()
+            .find(|id| Theme::builtin(id).is_some_and(|t| t.background == self.background && t.foreground == self.foreground && t.palette == self.palette))
+    }
+
+    /// A built-in theme by id (or by its shown name: "Catppuccin Mocha").
     pub fn builtin(name: &str) -> Option<Theme> {
+        if let Some(t) = Self::own(name) {
+            return Some(t);
+        }
+        if let Some(id) = Self::OWN.iter().find(|id| Self::title(id).eq_ignore_ascii_case(name)) {
+            return Self::own(id);
+        }
+        let s = crate::themes_data::SCHEMES.iter().find(|s| s.id == name || s.name.eq_ignore_ascii_case(name))?;
+        Some(Theme {
+            foreground: s.foreground,
+            background: s.background,
+            cursor: s.cursor,
+            cursor_text: s.background,
+            selection: s.selection,
+            // the scheme's yellow, a little into the background
+            search_match: blend(s.background, s.palette[3], 110),
+            palette: s.palette,
+            bold_is_bright: true,
+        })
+    }
+
+    fn own(name: &str) -> Option<Theme> {
         match name {
             "vibex-night" => Some(Theme::vibex_night()),
             // light, paper-like
@@ -156,9 +201,52 @@ pub fn blend(bg: u32, fg: u32, alpha: u8) -> u32 {
     ch(16) | ch(8) | ch(0)
 }
 
+/// Perceived brightness, 0-255 (ITU-R 601 weights).
+pub fn luma(c: u32) -> u32 {
+    (((c >> 16) & 0xff) * 299 + ((c >> 8) & 0xff) * 587 + (c & 0xff) * 114) / 1000
+}
+
+impl Theme {
+    /// Dark text on a pale background.
+    pub fn is_light(&self) -> bool {
+        luma(self.background) >= 128
+    }
+
+    /// Labels in Vibex's own UI: a little stronger than the text colour
+    /// (brighter on dark themes, darker on light ones).
+    pub fn strong_text(&self) -> u32 {
+        if self.is_light() {
+            blend(self.foreground, 0x000000, 70)
+        } else {
+            blend(self.foreground, 0xffffff, 120)
+        }
+    }
+
+    /// Black or white, whichever reads better on `bg`.
+    pub fn text_on(bg: u32) -> u32 {
+        if luma(bg) >= 150 {
+            0x111111
+        } else {
+            0xffffff
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn light_and_dark_ui_text() {
+        let day = Theme::builtin("vibex-day").unwrap();
+        let night = Theme::default();
+        assert!(day.is_light() && !night.is_light());
+        // UI text moves away from the background, never towards it
+        assert!(luma(day.strong_text()) < luma(day.foreground));
+        assert!(luma(night.strong_text()) > luma(night.foreground));
+        assert_eq!(Theme::text_on(0xffffff), 0x111111);
+        assert_eq!(Theme::text_on(0x1a1b26), 0xffffff);
+    }
 
     #[test]
     fn cube_and_grays() {
@@ -179,10 +267,21 @@ mod tests {
 
     #[test]
     fn builtins_exist() {
-        for name in Theme::BUILTIN {
-            assert!(Theme::builtin(name).is_some(), "{name}");
+        let ids = Theme::ids();
+        assert!(ids.len() >= 40, "{}", ids.len());
+        for id in &ids {
+            let t = Theme::builtin(id).unwrap_or_else(|| panic!("{id}"));
+            // ids are unique and each theme knows its own name
+            assert_eq!(ids.iter().filter(|x| *x == id).count(), 1, "{id}");
+            assert_eq!(t.identify(), Some(*id), "{id}");
+            // text stays readable on its background
+            let (fg, bg) = (luma(t.foreground) as i32, luma(t.background) as i32);
+            assert!((fg - bg).abs() >= 70, "{id}: foreground too close to background");
         }
         assert!(Theme::builtin("nope").is_none());
+        assert_eq!(Theme::builtin("Catppuccin Mocha").unwrap().background, 0x1e1e2e);
+        assert_eq!(Theme::builtin("Vibex Day").unwrap().background, Theme::builtin("vibex-day").unwrap().background);
+        assert_eq!(Theme::title("rose-pine"), "Ros\u{e9} Pine");
     }
 
     #[test]

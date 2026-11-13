@@ -258,6 +258,15 @@ fn installed_families() -> Vec<String> {
     out
 }
 
+/// Themes as the dropdown lists them: Vibex's own, then dark, then light.
+pub fn theme_order() -> Vec<&'static str> {
+    let ids = Theme::ids();
+    let own: Vec<&str> = ids.iter().copied().filter(|id| Theme::OWN.contains(id)).collect();
+    let light = |id: &&str| Theme::builtin(id).is_some_and(|t| t.is_light());
+    let others = ids.iter().copied().filter(|id| !Theme::OWN.contains(id));
+    own.into_iter().chain(others.clone().filter(|id| !light(id))).chain(others.filter(light)).collect()
+}
+
 fn cycle<T: PartialEq + Clone>(list: &[T], current: &T, dir: i32) -> T {
     let n = list.len() as i32;
     let i = list.iter().position(|x| x == current).map_or(0, |i| i as i32);
@@ -322,10 +331,7 @@ impl SettingsUi {
         match self.page() {
             Page::Appearance => {
                 push!(Field::Header, header("Colours"));
-                let theme_name = Theme::BUILTIN
-                    .iter()
-                    .find(|n| Theme::builtin(n).is_some_and(|t| t.background == cfg.theme.background && t.foreground == cfg.theme.foreground))
-                    .map_or("custom (vibex.lua)".to_string(), |n| n.to_string());
+                let theme_name = cfg.theme.identify().map_or("Custom (vibex.lua)".to_string(), Theme::title);
                 let mut theme = SettingRow::new("Theme", Control::Choice(theme_name)).detail("Colours for text, background and cursor");
                 theme.swatches = cfg.theme.palette[1..7].to_vec();
                 theme.swatches.insert(0, cfg.theme.background);
@@ -718,11 +724,8 @@ impl SettingsUi {
         self.focus = Some(i);
         let ch = match field {
             Field::Theme => {
-                let names: Vec<String> = Theme::BUILTIN.iter().map(|s| s.to_string()).collect();
-                let cur = Theme::BUILTIN
-                    .iter()
-                    .find(|n| Theme::builtin(n).is_some_and(|t| t.background == cfg.theme.background))
-                    .map_or(names[0].clone(), |n| n.to_string());
+                let names: Vec<String> = theme_order().into_iter().map(str::to_string).collect();
+                let cur = cfg.theme.identify().map_or(names[0].clone(), str::to_string);
                 Change::Theme(cycle(&names, &cur, dir))
             }
             Field::FontFamily => {
@@ -767,11 +770,8 @@ impl SettingsUi {
         };
         match self.fields.get(i)? {
             Field::Theme => {
-                let cur = Theme::BUILTIN
-                    .iter()
-                    .find(|n| Theme::builtin(n).is_some_and(|t| t.background == cfg.theme.background && t.foreground == cfg.theme.foreground))
-                    .map_or(String::new(), |n| n.to_string());
-                pick(Theme::BUILTIN.iter().map(|n| (n.to_string(), Change::Theme(n.to_string()))).collect(), &cur)
+                let cur = cfg.theme.identify().map_or(String::new(), Theme::title);
+                pick(theme_order().into_iter().map(|id| (Theme::title(id), Change::Theme(id.to_string()))).collect(), &cur)
             }
             Field::FontFamily => {
                 let cur = family_of(&cfg.fonts.regular);

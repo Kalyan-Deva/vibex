@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **53 themes:** 49 popular schemes (Catppuccin, Dracula, Monokai, Nord, Gruvbox, One Dark, Tomorrow Night, Cobalt2, Synthwave, Zenburn, Campbell, Rosé Pine, Kanagawa, Everforest, GitHub, Solarized, Tokyo Night and more), with proper names and colour swatches in the theme picker, grouped into Vibex, dark and light.
+- **Light themes:** the tab bar, Settings, menus and dialogs now read properly on light backgrounds (darker text, deeper accents, readable text on coloured tabs).
+- **Settings:** long paths keep their file name; the theme list opens at the current theme.
+- **Palette:** fuzzy search prefers close-together matches, so `set lig` finds ligatures rather than a theme.
+
 ## 0.1.0: first public release
 
 Everything in the [README](README.md#features). The headline features:

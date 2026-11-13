@@ -241,7 +241,7 @@ impl Engine {
     fn install(&self) -> mlua::Result<()> {
         let g = self.lua.globals();
         g.set("VIBEX_VERSION", env!("CARGO_PKG_VERSION"))?;
-        g.set("VIBEX_THEMES", self.lua.create_sequence_from(Theme::BUILTIN.iter().copied())?)?;
+        g.set("VIBEX_THEMES", self.lua.create_sequence_from(Theme::ids().into_iter())?)?;
         g.set("VIBEX_UNIT_ACTIONS", self.lua.create_sequence_from(Action::UNIT_NAMES.iter().copied())?)?;
         self.lua.load(PRELUDE).set_name("vibex-prelude").exec()?;
         let module: Table = g.get("VIBEX_MODULE")?;
@@ -680,11 +680,47 @@ fn parse_plain_action(v: &Value) -> Result<Action, String> {
     }
 }
 
+/// Levenshtein distance (for "did you mean").
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let next = (prev + usize::from(ca != cb)).min(row[j] + 1).min(row[j + 1] + 1);
+            prev = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
+}
+
 pub fn parse_theme(v: &Value) -> Result<Theme, String> {
     match v {
         Value::String(_) => {
             let name = string(v)?;
-            Theme::builtin(&name).ok_or_else(|| format!("unknown theme '{name}' (built-in: {})", Theme::BUILTIN.join(", ")))
+            Theme::builtin(&name).ok_or_else(|| {
+                // the closest ids: "catpuccin" -> catppuccin-*
+                let mut close: Vec<(i32, &str)> =
+                    Theme::ids().into_iter().filter_map(|id| crate::palette::score(&name.replace([' ', '-'], ""), id).map(|s| (s, id))).collect();
+                close.sort_by(|a, b| b.0.cmp(&a.0));
+                if close.is_empty() {
+                    // a wrong letter rather than a missing one: "drakula"
+                    let n = name.to_lowercase();
+                    close = Theme::ids()
+                        .into_iter()
+                        .filter(|id| edit_distance(&n, id) <= 2 || id.split('-').next().is_some_and(|w| edit_distance(&n, w) <= 2))
+                        .map(|id| (0, id))
+                        .collect();
+                }
+                match close.iter().take(3).map(|(_, id)| *id).collect::<Vec<_>>() {
+                    c if !c.is_empty() => {
+                        format!("unknown theme '{name}': did you mean {}? (all {} are listed in docs/CONFIG.md)", c.join(", "), Theme::ids().len())
+                    }
+                    _ => format!("unknown theme '{name}' (built-in: {})", Theme::ids().join(", ")),
+                }
+            })
         }
         Value::Table(t) => {
             check_keys(t, &["base", "foreground", "background", "cursor", "cursor_text", "selection", "search_match", "ansi", "brights", "bold_is_bright"])?;

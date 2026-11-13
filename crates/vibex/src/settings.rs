@@ -420,6 +420,13 @@ mod tests {
         assert!(!c.ligatures);
         assert!(!c.smooth_scroll);
         assert_eq!(c.theme.background, vibex_render::Theme::builtin("vibex-ember").unwrap().background);
+        // the schemes beyond Vibex's own work the same way, and survive a save
+        change(&mut s, &mut c, &Change::Theme("catppuccin-mocha".into()));
+        assert_eq!(c.theme.identify(), Some("catppuccin-mocha"));
+        let mut again = Config::default();
+        Settings::parse(&s.to_lua()).unwrap().apply(&mut again);
+        assert_eq!(again.theme.identify(), Some("catppuccin-mocha"));
+        change(&mut s, &mut c, &Change::Theme("vibex-ember".into()));
 
         let src = s.to_lua();
         let back = Settings::parse(&src).unwrap();

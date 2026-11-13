@@ -725,6 +725,27 @@ pub(crate) fn fit(fonts: &mut FontSet, cw: usize, text: &str, bold: bool, max: f
     String::new()
 }
 
+/// Like `fit`, but the ellipsis goes in the middle, so the end (a file name)
+/// stays: `C:\Users\me\…\settings.lua`.
+pub(crate) fn fit_middle(fonts: &mut FontSet, cw: usize, text: &str, bold: bool, max: f32) -> String {
+    if ui_width(fonts, cw, text, bold) <= max {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    // keep about a third from the start, the rest from the end
+    let mut keep = chars.len();
+    while keep > 1 {
+        keep -= 1;
+        let head = (keep / 3).max(1);
+        let tail = keep - head;
+        let t: String = chars[..head].iter().chain(std::iter::once(&'…')).chain(chars[chars.len() - tail..].iter()).collect();
+        if ui_width(fonts, cw, &t, bold) <= max {
+            return t;
+        }
+    }
+    String::from("…")
+}
+
 /// The title bar, drawn like Windows Terminal's: a dark strip; the active
 /// tab is cut out of it with rounded top corners so it flows into the
 /// terminal below; icon + title + ✕ on each tab; + and ⌄; window buttons.
@@ -735,7 +756,7 @@ pub fn tab_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize,
     let bar_bg = blend(theme.background, 0x000000, 70);
     // glass: a light smoky strip the backdrop shows through
     let bar_alpha = if glass { 90u8 } else { 235u8 };
-    let text_on = blend(theme.foreground, 0xffffff, 140);
+    let text_on = theme.strong_text();
     let dim = blend(bar_bg, theme.foreground, 165);
     let hover_bg = blend(bar_bg, theme.foreground, 18);
     let radius = (8.0 * s).round();
@@ -771,7 +792,12 @@ pub fn tab_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize,
             let x = (r.x + r.w - 1.0).round();
             scene.frect(PxRect { x, y: r.y + 8.0 * s, w: 1.0, h: r.h - 16.0 * s }, blend(bar_bg, theme.foreground, 40), 255);
         }
-        let fg = if tab.active || tab.color.is_some() { text_on } else { dim };
+        // on a coloured tab: black or white, whichever reads on that colour
+        let fg = match tab.color {
+            Some(c) => Theme::text_on(blend(if tab.active { theme.background } else { bar_bg }, c, if tab.active { 70 } else { 120 })),
+            None if tab.active => text_on,
+            None => dim,
+        };
         let mid = r.y + r.h / 2.0;
         let icon_x = r.x + 12.0 * s;
         match tab.icon {

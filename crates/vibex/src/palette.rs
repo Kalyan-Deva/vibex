@@ -41,6 +41,9 @@ pub fn score(query: &str, text: &str) -> Option<i32> {
     let mut s = 0;
     let mut ti = 0;
     let mut prev: Option<usize> = None;
+    // letters skipped between matches: "set lig" fits "Settings: ligatures"
+    // better than "Settings: theme Ayu Light"
+    let mut gaps = 0i32;
     for q in query.to_lowercase().chars().filter(|c| !c.is_whitespace()) {
         let pos = (ti..t.len()).find(|&i| t[i] == q)?;
         s += 1;
@@ -50,11 +53,14 @@ pub fn score(query: &str, text: &str) -> Option<i32> {
         if pos == 0 || !t[pos - 1].is_alphanumeric() {
             s += 3;
         }
+        if let Some(p) = prev {
+            gaps += (pos - p - 1).min(30) as i32;
+        }
         prev = Some(pos);
         ti = pos + 1;
     }
-    // prefer shorter labels for equal matches
-    Some(s * 100 - t.len() as i32)
+    // then prefer shorter labels for equal matches
+    Some(s * 100 - gaps * 4 - t.len() as i32)
 }
 
 fn hint_for(bindings: &[Binding], a: &Action) -> String {
@@ -171,10 +177,9 @@ fn setting_entries(cfg: &Config) -> Vec<Entry> {
     let mut push = |label: String, hint: String, change: Change| {
         out.push(Entry { label: format!("Settings: {label}"), hint, command: Command::Setting(change) });
     };
-    for name in Theme::BUILTIN {
-        let t = Theme::builtin(name).unwrap();
-        let current = t.background == cfg.theme.background && t.foreground == cfg.theme.foreground;
-        push(format!("theme {name}"), mark(current), Change::Theme(name.to_string()));
+    let now = cfg.theme.identify();
+    for id in Theme::ids() {
+        push(format!("theme {}", Theme::title(id)), mark(now == Some(id)), Change::Theme(id.to_string()));
     }
     let pt = cfg.font_size_pt;
     push("font size bigger".into(), format!("{pt}pt"), Change::FontSize(pt + 1.0));
@@ -288,7 +293,7 @@ mod tests {
         let cfg = Config::default();
         let labels: Vec<String> = entries(&cfg).into_iter().map(|e| e.label).collect();
         assert!(labels.iter().any(|l| l == "New tab: powershell"));
-        assert!(labels.iter().any(|l| l == "Settings: theme vibex-ember"));
+        assert!(labels.iter().any(|l| l == "Settings: theme Vibex Ember"));
         assert!(labels.iter().any(|l| l.starts_with("Open config")));
     }
 
@@ -297,8 +302,8 @@ mod tests {
         let cfg = Config::default();
         let e = entries(&cfg);
         let find = |l: &str| e.iter().find(|x| x.label == l).unwrap();
-        assert_eq!(find("Settings: theme tokyo-night").hint, "● current");
-        assert_eq!(find("Settings: theme vibex-night").hint, "");
+        assert_eq!(find("Settings: theme Tokyo Night").hint, "● current");
+        assert_eq!(find("Settings: theme Vibex Night").hint, "");
         assert_eq!(find("Settings: opacity 40%").hint, "● current");
         assert_eq!(find("Settings: ligatures (turn off)").hint, "on");
         let mut p = Palette::new(e.clone());

@@ -56,7 +56,7 @@ target\release\vibex.exe
 ### Terminal
 - **Own engine:** a DEC/ANSI parser, screen and scrollback with reflow, alternate screen, scroll regions, and xterm modifier keys.
 - **Rendering:** wgpu (DirectX 12 / Vulkan) with a CPU fallback and a hand-written glyph rasteriser. It supports ligatures, COLR v0/v1 colour emoji, and full grapheme clusters (ZWJ families, flags, skin tones).
-- **Look:** acrylic and glass transparency, a frameless window with its own title bar, rounded corners, four built-in themes (or your own colours), and smooth scrolling.
+- **Look:** acrylic and glass transparency, a frameless window with its own title bar, rounded corners, 53 built-in themes, from Catppuccin, Dracula, Monokai and Gruvbox to Solarized and Tokyo Night, light and dark (or your own colours), and smooth scrolling.
 - **Inline images:** sixel and the kitty graphics protocol. `vshow` draws PNGs and rendered Markdown right in the terminal, with `--width`, `--fit`, `--scale 50%` and more.
 - **Modern protocols:** OSC 8 hyperlinks, OSC 52 clipboard, OSC 9/777 notifications, the kitty keyboard protocol, IME input, and Ctrl+click on URLs and `path:line`.
 - **Accessibility:** screen readers through UI Automation.

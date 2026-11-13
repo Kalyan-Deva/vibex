@@ -21,7 +21,7 @@ Unknown options and unknown fields are errors, so typos are caught
 | `font` | family name, or `{ family, size, ligatures, regular, bold, italic, bold_italic, fallbacks }` | PlemolJP Console NF if installed, else Cascadia Code (in `~/.config/vibex/fonts`), else Consolas |
 | `font_size` | points | `11` |
 | `ligatures` | bool | `true` |
-| `theme` | `"tokyo-night"`, `"vibex-night"`, `"vibex-day"`, `"vibex-ember"`, or a table (below) | `"tokyo-night"` |
+| `theme` | a built-in theme by id or name (`"catppuccin-mocha"` or `"Catppuccin Mocha"`; the list is below), or a table (below) | `"tokyo-night"` |
 | `window` | `{ width, height, padding, opacity, renderer }` | `1100×680`, padding `{x=10,y=8}`, opacity `0.4` (acrylic, same darkness as Windows Terminal's 40%), `"auto"` |
 | `opacity` / `padding` | shortcuts for the `window` fields | |
 | `right_click` | `"menu"`: right-click opens a menu (link actions, copy / paste / select all / find, splits, tabs, the last command, Settings) with each shortcut shown; Shift+right-click works inside mouse apps like vim. `"paste"`: Windows Terminal's copy-if-selected-else-paste | `"menu"` |
@@ -56,6 +56,8 @@ status bar, smooth scrolling, prompt marks, dimming, session restore).
 (Consolas, Courier New, Lucida Console). Or give file paths directly with
 `regular = "C:/path/Font-Regular.ttf"`. Characters a font lacks fall back to
 `fallbacks`, then to Segoe UI Symbol / Emoji / CJK fonts.
+
+**Built-in themes** (Settings → Appearance shows them with their colours): Vibex's own `tokyo-night`, `vibex-night`, `vibex-day`, `vibex-ember`, and `ayu-dark`, `ayu-light`, `ayu-mirage`, `campbell`, `catppuccin-frappe`, `catppuccin-latte`, `catppuccin-macchiato`, `catppuccin-mocha`, `cobalt2`, `dracula`, `everforest-dark`, `everforest-light`, `github-dark`, `github-dark-dimmed`, `github-light`, `gruvbox-dark`, `gruvbox-light`, `gruvbox-material`, `horizon`, `iceberg`, `kanagawa-dragon`, `kanagawa-lotus`, `kanagawa-wave`, `material-ocean`, `monokai`, `moonfly`, `night-owl`, `nightfox`, `nord`, `nord-light`, `one-dark`, `one-half-dark`, `one-half-light`, `one-light`, `oxocarbon`, `palenight`, `poimandres`, `rose-pine`, `rose-pine-dawn`, `rose-pine-moon`, `snazzy`, `solarized-dark`, `solarized-light`, `synthwave`, `tokyo-night-day`, `tokyo-night-moon`, `tokyo-night-storm`, `tomorrow-night`, `zenburn`. A theme's shown name works too: `theme = "Catppuccin Mocha"`.
 
 **Themes.** A table may start from a built-in and override any colour (`"#rrggbb"`):
 

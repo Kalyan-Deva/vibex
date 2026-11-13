@@ -151,15 +151,16 @@ struct Ink {
 fn ink(theme: &Theme) -> Ink {
     let bg = theme.background;
     let (c0, _) = crate::glass::accents(theme);
+    let text = theme.strong_text();
     Ink {
-        heading: blend(blend(theme.foreground, 0xffffff, 120), c0, 150),
-        text: blend(theme.foreground, 0xffffff, 120),
+        heading: blend(text, c0, 150),
+        text,
         dim: if crate::glass::tint(theme) == 0xffffff { blend(bg, 0xdfe6ee, 150) } else { blend(bg, theme.foreground, 150) },
         card: blend(bg, theme.foreground, 14),
         card_hover: blend(bg, theme.foreground, 24),
         line: blend(bg, theme.foreground, 60),
-        accent: crate::glass::CYAN,
-        on_accent: 0x06121a,
+        accent: c0,
+        on_accent: Theme::text_on(c0),
         warn: theme.palette[1],
     }
 }
@@ -206,14 +207,24 @@ pub fn settings(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize
         } else if hovered {
             crate::glass::fill(scene, r, item_h / 2.0, tint, 14);
         }
+        // the selected page: white on the dark glass, near-black on light
+        let on_pill = if theme.is_light() { 0x0d1b2a } else { 0xffffff };
         let fg = if selected {
-            0xffffff
+            on_pill
         } else if hovered {
             k.text
         } else {
             k.dim
         };
-        crate::icons::draw_in(scene, page_icon(name), r.x + 22.0 * s, r.y + r.h / 2.0, 18.0 * s, fg, if selected { 0xffffff } else { crate::icons::ACCENT });
+        crate::icons::draw_in(
+            scene,
+            page_icon(name),
+            r.x + 22.0 * s,
+            r.y + r.h / 2.0,
+            18.0 * s,
+            fg,
+            if selected { on_pill } else { crate::glass::accents(theme).0 },
+        );
         ui_text(scene, fonts, (r.x + 42.0 * s).round() as i32, r.y + r.h / 2.0, cw, ch, name, fg, selected);
         regions.push((r, SettingsHit::Page(i)));
         y += item_h + 4.0 * s;
@@ -365,7 +376,8 @@ fn draw_control(
     match c {
         Control::Header => right,
         Control::Info(t) => {
-            let t = fit(fonts, cw, t, false, r.w * 0.55);
+            // a path keeps its start and its file name: C:\Users\…\vibex.lua
+            let t = if t.contains(['\\', '/']) { crate::scene::fit_middle(fonts, cw, t, false, r.w * 0.55) } else { fit(fonts, cw, t, false, r.w * 0.55) };
             let w = ui_width(fonts, cw, &t, false);
             ui_text(scene, fonts, (right - w).round() as i32, mid, cw, ch, &t, k.dim, false);
             right - w
@@ -614,6 +626,8 @@ pub enum MenuIcon {
     Settings,
     /// A VibeX icon by name (icons.rs).
     Named(&'static str),
+    /// A theme's colours: its background with three of its colours on it.
+    Swatch([u32; 4]),
 }
 
 /// The icon for a Settings page.
@@ -715,7 +729,8 @@ pub fn menu(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch
         crate::glass::fill(scene, PxRect { x: x - g, y: y - g + 6.0 * s, w: w + 2.0 * g, h: h + 2.0 * g }, radius + g, 0x000000, a);
     }
     crate::glass::fill(scene, frame, radius, bg, 255);
-    crate::glass::gradient(scene, frame, radius, crate::glass::BLUE, crate::glass::CYAN, 18, 0);
+    let (a0, a1) = crate::glass::accents(theme);
+    crate::glass::gradient(scene, frame, radius, a1, a0, 18, 0);
     crate::glass::ring(scene, frame, radius, tint, 46);
     let mut items = vec![PxRect::default(); m.items.len()];
     let mut iy = y + pad;
@@ -736,6 +751,17 @@ pub fn menu(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch
             Some(MenuIcon::Terminal) => crate::icons::draw(scene, "terminal", r.x + 19.0 * s, mid, 17.0 * s, k.text),
             Some(MenuIcon::Settings) => crate::icons::draw(scene, "sliders", r.x + 19.0 * s, mid, 17.0 * s, k.text),
             Some(MenuIcon::Named(n)) => crate::icons::draw(scene, n, r.x + 19.0 * s, mid, 17.0 * s, k.dim),
+            Some(MenuIcon::Swatch([bg, a, b, c])) => {
+                let (w, h) = ((24.0 * s).round(), (16.0 * s).round());
+                let chip = PxRect { x: (r.x + 7.0 * s).round(), y: (mid - h / 2.0).round(), w, h };
+                crate::glass::fill(scene, chip, 4.0 * s, bg, 255);
+                crate::glass::ring(scene, chip, 4.0 * s, k.line, 255);
+                let d = (5.0 * s).round();
+                for (n, col) in [a, b, c].into_iter().enumerate() {
+                    let dot = PxRect { x: (chip.x + 4.0 * s + n as f32 * (d + 1.5 * s)).round(), y: (mid - d / 2.0).round(), w: d, h: d };
+                    crate::glass::fill(scene, dot, d / 2.0, col, 255);
+                }
+            }
             None => {}
         }
         ui_text(scene, fonts, (r.x + 38.0 * s).round() as i32, mid, cw, ch, &it.label, k.text, false);

@@ -15,6 +15,7 @@ mod scene;
 pub mod settings_view;
 pub mod tabbar;
 mod theme;
+mod themes_data;
 
 pub use cpu::Frame;
 pub use font::{is_emoji, FontPaths, FontSet, GlyphKey, Style};

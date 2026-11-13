@@ -9,12 +9,10 @@ use crate::theme::{blend, Theme};
 
 /// White on dark themes, black on light ones: what "glass" is tinted with.
 pub fn tint(theme: &Theme) -> u32 {
-    let bg = theme.background;
-    let luma = ((bg >> 16) & 0xff) * 299 + ((bg >> 8) & 0xff) * 587 + (bg & 0xff) * 114;
-    if luma < 128_000 {
-        0xffffff
-    } else {
+    if theme.is_light() {
         0x000000
+    } else {
+        0xffffff
     }
 }
 
@@ -25,9 +23,17 @@ pub const BLUE: u32 = 0x4f6ef7;
 /// The third glow: a dim teal.
 pub const TEAL: u32 = 0x1fb8a6;
 
+/// Deeper versions for light themes (cyan on white has no contrast).
+pub const CYAN_DEEP: u32 = 0x0b86b4;
+pub const BLUE_DEEP: u32 = 0x3a56d6;
+
 /// The two colours the gradients run between.
-pub fn accents(_theme: &Theme) -> (u32, u32) {
-    (CYAN, BLUE)
+pub fn accents(theme: &Theme) -> (u32, u32) {
+    if theme.is_light() {
+        (CYAN_DEEP, BLUE_DEEP)
+    } else {
+        (CYAN, BLUE)
+    }
 }
 
 fn mix(a: u32, b: u32, t: f32) -> u32 {

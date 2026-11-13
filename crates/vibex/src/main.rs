@@ -4478,14 +4478,9 @@ impl Session {
         let Some((opts, cur)) = self.settings_ui.options(i, &cfg) else { return };
         let rect = self.chrome_layout.settings.as_ref().and_then(|l| l.regions.iter().find(|(_, h)| *h == SettingsHit::Control(i)).map(|(r, _)| *r));
         let Some(rect) = rect else { return };
-        let items = opts
-            .into_iter()
-            .enumerate()
-            .map(|(k, (label, ch))| {
-                (MenuItem { label, hint: if k == cur { "\u{2713}".into() } else { String::new() }, separator: false, icon: None }, MenuCmd::Setting(ch))
-            })
-            .collect();
-        self.menu = Some(Menu { items, typing: false, first: 0, min_width: rect.w, selected: Some(cur), x: rect.x, y: rect.y + rect.h + 4.0 });
+        let (items, first) = dropdown_items(opts, cur);
+        let items: Vec<(MenuItem, MenuCmd)> = items.into_iter().map(|(m, ch)| (m, MenuCmd::Setting(ch))).collect();
+        self.menu = Some(Menu { items, typing: false, first, min_width: rect.w, selected: Some(cur), x: rect.x, y: rect.y + rect.h + 4.0 });
         self.window.request_redraw();
     }
 
@@ -6073,6 +6068,41 @@ const SAMPLE_RIGHT: &str = "\x1b]133;A\x07PS C:\\code\\vibex> git log --oneline 
     \x1b[33m77a0b12\x1b[0m own vt parser and conpty\r\n\x1b]133;D;0\x07\
     \x1b]133;A\x07PS C:\\code\\vibex> ";
 
+/// A Settings dropdown's items; themes get their colours and are grouped
+/// (Vibex's, dark, light). Also where a long list opens scrolled to.
+fn dropdown_items(opts: Vec<(String, settings::Change)>, cur: usize) -> (Vec<(MenuItem, settings::Change)>, usize) {
+    let group = |ch: &settings::Change| match ch {
+        settings::Change::Theme(id) => {
+            let t = vibex_render::Theme::builtin(id)?;
+            let g = if vibex_render::Theme::OWN.contains(&id.as_str()) {
+                0
+            } else if t.is_light() {
+                2
+            } else {
+                1
+            };
+            Some((g, [t.background, t.palette[1], t.palette[2], t.palette[4]]))
+        }
+        _ => None,
+    };
+    let mut last_group = None;
+    let items: Vec<(MenuItem, settings::Change)> = opts
+        .into_iter()
+        .enumerate()
+        .map(|(k, (label, ch))| {
+            let info = group(&ch);
+            let separator = info.is_some_and(|(g, _)| last_group.is_some_and(|l| l != g));
+            if let Some((g, _)) = info {
+                last_group = Some(g);
+            }
+            let icon = info.map(|(_, sw)| MenuIcon::Swatch(sw));
+            (MenuItem { label, hint: if k == cur { "\u{2713}".into() } else { String::new() }, separator, icon }, ch)
+        })
+        .collect();
+    let first = if items.len() > 12 { cur.saturating_sub(5) } else { 0 };
+    (items, first)
+}
+
 /// `vibex --preview out.bmp [--palette]`: render the window (custom title
 /// bar, two tabs, a split, status bar) with the loaded config, no window.
 fn bar_layout_menu_rect(chrome: &Chrome) -> Option<PxRect> {
@@ -6112,7 +6142,7 @@ fn render_preview(out: &std::path::Path, cfg: &Config, engine: &Engine, profile:
     }
     // VIBEX_PREVIEW_SSH=1: the active pane connected to a "prod" host
     let ssh_preview = std::env::var_os("VIBEX_PREVIEW_SSH").is_some();
-    let mut dropdown: Option<(usize, Vec<String>, usize)> = None;
+    let mut dropdown: Option<(usize, Vec<(MenuItem, settings::Change)>, usize, usize)> = None;
     // VIBEX_PREVIEW_SUGGEST=1: a suggestion after the cursor (and =menu: the popup)
     let suggest_preview = std::env::var("VIBEX_PREVIEW_SUGGEST").ok();
     let mut popup_at: Option<(f32, f32)> = None;
@@ -6263,7 +6293,8 @@ fn render_preview(out: &std::path::Path, cfg: &Config, engine: &Engine, profile:
         // VIBEX_PREVIEW_DROPDOWN=<row>: that row's dropdown, open
         if let Some(i) = std::env::var("VIBEX_PREVIEW_DROPDOWN").ok().and_then(|v| v.parse::<usize>().ok()) {
             if let Some((opts, cur)) = ui.options(i, cfg) {
-                dropdown = Some((i, opts.into_iter().map(|(l, _)| l).collect(), cur));
+                let (items, first) = dropdown_items(opts, cur);
+                dropdown = Some((i, items, cur, first));
             }
         }
         chrome.settings = Some((view, settings_dialog_rect(content, r.ui_scale), content));
@@ -6329,16 +6360,12 @@ fn render_preview(out: &std::path::Path, cfg: &Config, engine: &Engine, profile:
         chrome.palette = Some(p.view());
     }
     let layout = r.draw_chrome(&mut scene, &chrome);
-    if let Some((i, labels, cur)) = dropdown {
+    if let Some((i, items, cur, first)) = dropdown {
         let rect = layout.settings.as_ref().and_then(|l| l.regions.iter().find(|(_, h)| *h == SettingsHit::Control(i)).map(|(r, _)| *r));
         if let Some(rect) = rect {
-            let items = labels
-                .into_iter()
-                .enumerate()
-                .map(|(k, label)| MenuItem { label, hint: if k == cur { "\u{2713}".into() } else { String::new() }, separator: false, icon: None })
-                .collect();
+            let items = items.into_iter().map(|(m, _)| m).collect();
             let menu = Chrome {
-                menu: Some(MenuView { items, x: rect.x, y: rect.y + rect.h + 4.0, selected: Some(cur), first: 0, min_width: rect.w }),
+                menu: Some(MenuView { items, x: rect.x, y: rect.y + rect.h + 4.0, selected: Some(cur), first, min_width: rect.w }),
                 ..Default::default()
             };
             r.draw_chrome(&mut scene, &menu);

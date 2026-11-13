@@ -13,4 +13,6 @@ These programs aren't linked into Vibex. They're shipped beside it, and Vibex ru
 
 The source for each MSYS2 package is in the [MSYS2-packages](https://github.com/msys2/MSYS2-packages) repository and at [mirror.msys2.org/msys/sources](https://mirror.msys2.org/msys/sources/). The installed `tools\LICENSES\SOURCES.txt` lists the exact package versions.
 
+The extra colour themes (Catppuccin, Dracula, Nord, Gruvbox, Rosé Pine, Kanagawa, Everforest, GitHub, Tokyo Night variants and others) come from the [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) collection (MIT, Copyright Mark Badolato; each scheme is its authors' work), Solarized from Ethan Schoonover's published palette, and Campbell from Windows Terminal ([microsoft/terminal](https://github.com/microsoft/terminal), MIT).
+
 Rust crates that Vibex is built with are listed in `Cargo.lock`. Each crate keeps its own licence, and all of them are permissive (MIT, Apache-2.0, BSD, ISC, Zlib, BSL-1.0, Unlicense or Unicode-3.0).
