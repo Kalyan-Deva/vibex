@@ -24,11 +24,14 @@ pub struct FileRef {
 /// "src/main.rs:12:5" / "a.cpp(12,5):" / "C:\x\y.py:3" / "./run.sh" ->
 /// (path, line, col). Needs a directory separator or a file extension.
 pub fn parse_file_ref(token: &str) -> Option<(String, Option<u32>, Option<u32>)> {
-    let t = token.trim_end_matches([',', '.', ':', ';', ')']).trim_start_matches(['(', '@']);
+    let end_trimmed = token.trim_end_matches([',', '.', ':', ';', ')']);
+    let t = end_trimmed.trim_start_matches(['(', '@']);
+    // where `t` starts inside `token` (indexes into `t` are offset by this)
+    let lead = end_trimmed.len() - t.len();
     let num = |s: &str| s.parse::<u32>().ok().filter(|n| *n > 0);
     // MSVC: path(line,col) or path(line)
     let (path, line, col) = if let Some(open) = t.rfind('(').filter(|_| token.contains(')')) {
-        let inner = token[open + 1..].split(')').next().unwrap_or("");
+        let inner = token[lead + open + 1..].split(')').next().unwrap_or("");
         let mut it = inner.split(',');
         (t[..open].to_string(), it.next().and_then(num), it.next().and_then(num))
     } else {
@@ -105,25 +108,44 @@ fn url_spans(text: &[char]) -> Vec<(usize, usize)> {
             continue;
         };
         let mut end = i + scheme;
-        while end < text.len() && is_url_char(text[end]) {
+        // no URL is this long; stops a line of junk costing much
+        while end < text.len() && end - i < MAX_URL && is_url_char(text[end]) {
             end += 1;
         }
-        while end > i + scheme {
-            let c = text[end - 1];
-            let s: String = text[i..end].iter().collect();
-            let unbalanced = |open: char, close: char| c == close && s.matches(open).count() < s.matches(close).count();
-            if ".,;:!?".contains(c) || unbalanced('(', ')') || unbalanced('[', ']') {
-                end -= 1;
-            } else {
-                break;
-            }
-        }
+        end = trim_url_end(text, i + scheme, i, end);
         if end > i + scheme {
             out.push((i, end));
         }
         i = end.max(i + 1);
     }
     out
+}
+
+/// The longest URL Vibex looks at, in characters.
+const MAX_URL: usize = 4096;
+
+/// Drop trailing punctuation and unmatched closing brackets from the URL
+/// `text[from..end]` (never below `min`). Bracket counts are kept as it
+/// goes, so a URL followed by thousands of dots costs one pass.
+fn trim_url_end(text: &[char], min: usize, from: usize, mut end: usize) -> usize {
+    let count = |c: char| text[from..end].iter().filter(|x| **x == c).count();
+    let (mut po, mut pc, mut bo, mut bc) = (count('('), count(')'), count('['), count(']'));
+    while end > min {
+        let c = text[end - 1];
+        let drop = ".,;:!?".contains(c) || (c == ')' && po < pc) || (c == ']' && bo < bc);
+        if !drop {
+            break;
+        }
+        match c {
+            ')' => pc -= 1,
+            ']' => bc -= 1,
+            '(' => po -= 1,
+            '[' => bo -= 1,
+            _ => {}
+        }
+        end -= 1;
+    }
+    end
 }
 
 fn is_hex(s: &str) -> bool {
@@ -221,7 +243,9 @@ impl Terminal {
         while line < end {
             hay.clear();
             at.clear();
-            // gather one logical line
+            // gather one logical line (at most 400 rows of it); `line` may
+            // start above `lines.start`, so count from where this one began
+            let first = line;
             loop {
                 let Some(row) = self.absolute_row(line) else { break };
                 for (c, x) in row_chars(row) {
@@ -229,7 +253,7 @@ impl Terminal {
                     hay.push(c);
                 }
                 line += 1;
-                if !row.wrapped || line >= self.total_lines() || line - lines.start > 400 {
+                if !row.wrapped || line >= self.total_lines() || line - first > 400 {
                     break;
                 }
             }
@@ -343,6 +367,9 @@ impl Terminal {
             return Some(l);
         }
         let (first, last) = self.logical_line_bounds(line);
+        // a few dozen rows either side are plenty for a URL (this runs on
+        // every mouse move while Ctrl is held)
+        let (first, last) = (first.max(line.saturating_sub(48)), last.min(line + 48));
         let mut chars: Vec<(char, usize, usize)> = Vec::new();
         for l in first..=last {
             let row = self.absolute_row(l)?;
@@ -367,20 +394,11 @@ impl Terminal {
                 continue;
             };
             let mut end = i + scheme;
-            while end < text.len() && is_url_char(text[end]) {
+            while end < text.len() && end - i < MAX_URL && is_url_char(text[end]) {
                 end += 1;
             }
             // trim trailing punctuation and unbalanced closing brackets
-            while end > i + scheme {
-                let c = text[end - 1];
-                let s: String = text[i..end].iter().collect();
-                let unbalanced = |open: char, close: char| c == close && s.matches(open).count() < s.matches(close).count();
-                if ".,;:!?".contains(c) || unbalanced('(', ')') || unbalanced('[', ']') {
-                    end -= 1;
-                } else {
-                    break;
-                }
-            }
+            end = trim_url_end(&text, i + scheme, i, end);
             if end > i + scheme && hit >= i && hit < end {
                 let url: String = text[i..end].iter().collect();
                 let s = chars[i];

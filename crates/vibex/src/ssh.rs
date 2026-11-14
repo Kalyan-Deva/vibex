@@ -21,8 +21,9 @@ pub fn parse_config(text: &str, include: &mut dyn FnMut(&str) -> Option<String>,
             continue;
         }
         // "Key value" or "Key=value"
-        let (key, rest) = match line.find(|c: char| c.is_whitespace() || c == '=') {
-            Some(i) => (&line[..i], line[i + 1..].trim_start_matches(|c: char| c.is_whitespace() || c == '=')),
+        // (the separator can be a multi-byte space, like NBSP)
+        let (key, rest) = match line.char_indices().find(|(_, c)| c.is_whitespace() || *c == '=') {
+            Some((i, c)) => (&line[..i], line[i + c.len_utf8()..].trim_start_matches(|c: char| c.is_whitespace() || c == '=')),
             None => continue,
         };
         if key.eq_ignore_ascii_case("host") {
@@ -264,6 +265,14 @@ mod tests {
         let mut out = Vec::new();
         parse_config(cfg, &mut |t| (t == "extra").then(|| "Host nas\nHost pi".to_string()), 0, &mut out);
         assert_eq!(out, ["pi", "devbox", "gpu", "nas"]);
+    }
+
+    #[test]
+    fn wide_spaces_after_the_key() {
+        // NBSP and the ideographic space are whitespace too (no panic)
+        let mut out = Vec::new();
+        parse_config("Host\u{a0}pi\nHost\u{3000}box\nHost\u{3000}", &mut |_| None, 0, &mut out);
+        assert_eq!(out, ["pi", "box"]);
     }
 
     #[test]

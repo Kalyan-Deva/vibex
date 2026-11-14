@@ -288,6 +288,10 @@ mod imp {
             return false;
         }
         let first = first as usize;
+        // requests are still answered one at a time, but each client is
+        // read on its own thread: one that connects and sends nothing
+        // can't hold up every later launch
+        let handle = std::sync::Arc::new(std::sync::Mutex::new(handle));
         std::thread::Builder::new()
             .name("vibex-single-instance".into())
             .spawn(move || {
@@ -304,17 +308,28 @@ mod imp {
                         }
                         std::thread::sleep(std::time::Duration::from_millis(200));
                     };
-                    if connected {
-                        let reply = match read_request(h).as_deref().and_then(Request::decode) {
-                            Some(req) => handle(req),
-                            None => "error: bad request".into(),
-                        };
-                        write_all(h, reply.as_bytes());
-                        unsafe { FlushFileBuffers(h) };
-                    }
-                    unsafe {
-                        DisconnectNamedPipe(h);
-                        CloseHandle(h);
+                    let (client, handle) = (h as usize, handle.clone());
+                    let served = std::thread::Builder::new().name("vibex-single-client".into()).spawn(move || {
+                        let h = client as HANDLE;
+                        if connected {
+                            let reply = match read_request(h).as_deref().and_then(Request::decode) {
+                                Some(req) => (handle.lock().unwrap_or_else(|e| e.into_inner()))(req),
+                                None => "error: bad request".into(),
+                            };
+                            write_all(h, reply.as_bytes());
+                            unsafe { FlushFileBuffers(h) };
+                        }
+                        unsafe {
+                            DisconnectNamedPipe(h);
+                            CloseHandle(h);
+                        }
+                    });
+                    if served.is_err() {
+                        // no thread for it: hang up on this client
+                        unsafe {
+                            DisconnectNamedPipe(h);
+                            CloseHandle(h);
+                        }
                     }
                     h = next;
                 }
@@ -382,6 +397,14 @@ mod tests {
         }));
         // a second server on the same name is refused (no squatting)
         assert!(!imp::serve_on(name.clone(), |_| String::new()));
+        // a client that connects and says nothing doesn't block the others
+        let silent = {
+            use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+            use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
+            let h = unsafe { CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut()) };
+            assert!(h != INVALID_HANDLE_VALUE);
+            h
+        };
         for i in 0..3 {
             let req = Request::Open(OpenRequest { profile: Some(format!("p{i}")), ..Default::default() });
             assert_eq!(imp::send_to(&name, &req).as_deref(), Some("ok"), "send {i}");
@@ -391,5 +414,6 @@ mod tests {
         let reply = imp::send_to(&name, &Request::Cli(vec!["list".into(), big.clone()])).unwrap();
         assert_eq!(reply.len(), "echo list ".len() + big.len(), "large payloads both ways");
         assert!(imp::send_to(&imp::name("-nobody-listens"), &Request::Cli(vec![])).is_none());
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(silent) };
     }
 }

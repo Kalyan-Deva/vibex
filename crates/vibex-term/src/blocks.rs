@@ -40,8 +40,10 @@ pub struct Block {
 pub(crate) struct BlockState {
     next_id: u32,
     pub(crate) commands: BTreeMap<u32, CommandInfo>,
-    /// Where typing began (OSC 133;B): absolute line, column.
-    input_at: Option<(usize, usize)>,
+    /// Where typing began (OSC 133;B): stable line (absolute + evicted),
+    /// column, and the epoch that numbering belongs to. Lines evicted from
+    /// the top of a full history don't move it.
+    pub(crate) input_at: Option<(u64, usize, u64)>,
     /// Exact command text from OSC 633;E.
     pending_text: Option<String>,
     /// The command currently running (between C and D).
@@ -63,12 +65,13 @@ pub(crate) fn unescape_633(s: &str) -> String {
                 i += 2;
                 continue;
             }
-            if b[i + 1] == b'x' && i + 3 < b.len() {
-                if let Ok(v) = u8::from_str_radix(&s[i + 2..i + 4], 16) {
-                    out.push(v);
-                    i += 4;
-                    continue;
-                }
+            // two hex digits, checked as bytes: slicing the str could land
+            // inside a multi-byte character (`\xé`) and panic
+            if b[i + 1] == b'x' && i + 3 < b.len() && b[i + 2].is_ascii_hexdigit() && b[i + 3].is_ascii_hexdigit() {
+                let hex = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+                out.push(hex(b[i + 2]) << 4 | hex(b[i + 3]));
+                i += 4;
+                continue;
             }
         }
         out.push(b[i]);
@@ -93,7 +96,7 @@ impl Terminal {
         if self.alt_active || self.blocks.running.is_some() || self.display_offset() != 0 {
             return None;
         }
-        let (l, c) = self.blocks.input_at?;
+        let (l, c) = self.input_start()?;
         let (cx, cl) = (self.cursor.x, self.cursor_line());
         if cl < l || (cl == l && cx < c) || cl - l > 8 {
             return None;
@@ -123,6 +126,16 @@ impl Terminal {
         self.scrollback.len() + self.cursor.y
     }
 
+    /// Where typing began, as an absolute line and column (None if that
+    /// line is gone, or a re-wrap renumbered everything).
+    pub(crate) fn input_start(&self) -> Option<(usize, usize)> {
+        let (stable, col, epoch) = self.blocks.input_at?;
+        if epoch != self.epoch || stable < self.evicted {
+            return None;
+        }
+        Some(((stable - self.evicted) as usize, col))
+    }
+
     /// The prompt mark nearest above `line` (with its absolute line).
     fn prompt_above(&self, line: usize, limit: usize) -> Option<(usize, PromptMark)> {
         (line.saturating_sub(limit)..=line).rev().find_map(|l| self.absolute_row(l).and_then(|r| r.prompt).map(|m| (l, m)))
@@ -132,6 +145,20 @@ impl Terminal {
     pub(crate) fn mark_prompt(&mut self) {
         if self.alt_active {
             return;
+        }
+        // A new prompt means the last command is over, whether or not the
+        // shell said so (PowerShell sends no 133;D for a command stopped
+        // with Ctrl+C). Left "running", Vibex would stop tracking what's
+        // typed, and the risky-command check would let Enter straight
+        // through as if a program were reading it.
+        if let Some(id) = self.blocks.running.take() {
+            if let Some(info) = self.blocks.commands.get_mut(&id) {
+                info.duration = info.started.map(|s| s.elapsed());
+                self.blocks.finished.push(Finished { text: info.text.clone(), exit: None, duration: info.duration });
+                if self.blocks.finished.len() > 32 {
+                    self.blocks.finished.remove(0);
+                }
+            }
         }
         let b = &mut self.blocks;
         b.next_id = b.next_id.wrapping_add(1).max(1);
@@ -149,7 +176,7 @@ impl Terminal {
     /// OSC 133;B: the prompt ends, typing starts here.
     pub(crate) fn mark_input(&mut self) {
         if !self.alt_active {
-            self.blocks.input_at = Some((self.cursor_line(), self.cursor.x));
+            self.blocks.input_at = Some((self.cursor_line() as u64 + self.evicted, self.cursor.x, self.epoch));
         }
     }
 
@@ -167,10 +194,13 @@ impl Terminal {
         let y = self.cursor.y;
         self.primary[y].output = true;
         let Some((_, mark)) = self.prompt_above(line, 500) else { return };
+        // typing is over: where it began is used once, here
+        let typed_at = self.input_start();
+        self.blocks.input_at = None;
         let text = match self.blocks.pending_text.take() {
             Some(t) => t,
             // no exact text: read what was typed between B and here
-            None => match self.blocks.input_at.take() {
+            None => match typed_at {
                 Some((l, c)) if l <= line => {
                     let end = if self.cursor.x == 0 && line > l { (self.cols - 1, line - 1) } else { (self.cursor.x, line) };
                     self.text_range((c, l), end).trim().replace('\n', " ")
@@ -192,16 +222,27 @@ impl Terminal {
         if self.alt_active {
             return;
         }
+        // whatever happens below, nothing is running any more (a `cls` or
+        // `clear` wipes the prompt row, and a command left "running" would
+        // stop the next prompt's input being tracked)
+        let running = self.blocks.running.take();
+        let exit = exit.or(Some(0));
         let start = self.cursor_line();
         let found = (start.saturating_sub(5000)..=start).rev().find(|&l| self.absolute_row(l).and_then(|r| r.prompt).is_some_and(|m| m.exit.is_none()));
-        let Some(line) = found else { return };
-        let exit = exit.or(Some(0));
         let sb = self.scrollback.len();
-        let row = if line < sb { self.scrollback.get_mut(line) } else { self.primary.get_mut(line - sb) };
-        let Some(mark) = row.and_then(|r| r.prompt.as_mut()) else { return };
-        mark.exit = exit;
-        let id = mark.cmd;
-        let running = self.blocks.running.take();
+        let mark =
+            found.and_then(|line| if line < sb { self.scrollback.get_mut(line) } else { self.primary.get_mut(line - sb) }).and_then(|r| r.prompt.as_mut());
+        // its prompt row is gone: the command still finished (history, notices)
+        let id = match mark {
+            Some(mark) => {
+                mark.exit = exit;
+                mark.cmd
+            }
+            None => match running {
+                Some(id) => id,
+                None => return,
+            },
+        };
         if let Some(info) = self.blocks.commands.get_mut(&id) {
             info.exit = exit;
             info.duration = info.started.map(|s| s.elapsed());

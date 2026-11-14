@@ -30,8 +30,8 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{WriteFile, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE};
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, CREATE_NO_WINDOW,
-    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
+    CREATE_NO_WINDOW, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
@@ -228,6 +228,8 @@ pub(crate) fn create(host: &Path, cols: u16, rows: u16, input: HANDLE, output: H
     match reference {
         Ok(reference) => Ok(Box::new(OpenPc { signal: sig_ours, reference, process: pi.hProcess })),
         Err(e) => {
+            // the host started but can't be used: don't leave it running
+            unsafe { TerminateProcess(pi.hProcess, 1) };
             close(sig_ours);
             close(pi.hProcess);
             Err(e)

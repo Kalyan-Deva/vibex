@@ -7,8 +7,14 @@ use crate::font::{Bitmap, FontSet, GlyphKey};
 use crate::scene::{Clip, Item, Scene};
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 
 const ATLAS_SIZE: u32 = 2048;
+/// The atlas grows (once) when one frame's glyphs don't fit.
+const MAX_ATLAS_SIZE: u32 = 4096;
+/// The instance buffer starts here and shrinks back to it after a big frame.
+const MIN_INSTANCES: usize = 16 * 1024;
 /// Image textures not drawn for this many frames are dropped.
 const IMAGE_TTL_FRAMES: u64 = 600;
 /// Keep at most this much image texture memory.
@@ -88,29 +94,31 @@ struct AtlasEntry {
 
 struct Atlas {
     map: HashMap<GlyphKey, AtlasEntry>,
+    size: u32,
     x: u32,
     y: u32,
     row_h: u32,
 }
 
 impl Atlas {
-    fn new() -> Self {
-        Self { map: HashMap::new(), x: 0, y: 0, row_h: 0 }
+    fn new(size: u32) -> Self {
+        Self { map: HashMap::new(), size, x: 0, y: 0, row_h: 0 }
     }
     fn clear(&mut self) {
-        *self = Self::new();
+        *self = Self::new(self.size);
     }
     /// Reserve space (1px gutter). None if full.
     fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
-        if w + 1 > ATLAS_SIZE || h + 1 > ATLAS_SIZE {
+        let size = self.size;
+        if w.saturating_add(1) > size || h.saturating_add(1) > size {
             return None;
         }
-        if self.x + w + 1 > ATLAS_SIZE {
+        if self.x + w + 1 > size {
             self.x = 0;
             self.y += self.row_h;
             self.row_h = 0;
         }
-        if self.y + h + 1 > ATLAS_SIZE {
+        if self.y + h + 1 > size {
             return None;
         }
         let pos = (self.x, self.y);
@@ -123,11 +131,19 @@ impl Atlas {
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
+    /// None while a lost surface couldn't be made again (retried each frame).
+    surface: Option<wgpu::Surface<'static>>,
+    /// Makes a new surface for the window (after the old one is lost).
+    make_surface: Box<dyn Fn() -> Option<wgpu::Surface<'static>> + Send + Sync>,
     config: wgpu::SurfaceConfiguration,
+    /// Configure again after presenting (the last frame was suboptimal).
+    reconfigure: bool,
+    /// Set by wgpu when the device is gone (driver reset, GPU switch).
+    lost: Arc<AtomicBool>,
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     image_sampler: wgpu::Sampler,
     images: HashMap<u64, GpuImage>,
     frame_no: u64,
@@ -137,7 +153,7 @@ pub struct GpuRenderer {
     instance_cap: usize,
     texture: wgpu::Texture,
     atlas: Atlas,
-    font_generation: (u32, usize),
+    font_generation: (u32, u32, usize),
     blur_pipeline: wgpu::RenderPipeline,
     blur_layout: wgpu::BindGroupLayout,
     blur_params: [wgpu::Buffer; 4],
@@ -155,7 +171,12 @@ impl GpuRenderer {
     /// Create a renderer for `target` (an `Arc<Window>`). With
     /// `want_transparency`, DX12 presents through DirectComposition so the
     /// window can be see-through.
-    pub fn new(target: impl Into<wgpu::SurfaceTarget<'static>> + Clone, width: u32, height: u32, want_transparency: bool) -> Result<Self, String> {
+    pub fn new(
+        target: impl Into<wgpu::SurfaceTarget<'static>> + Clone + Send + Sync + 'static,
+        width: u32,
+        height: u32,
+        want_transparency: bool,
+    ) -> Result<Self, String> {
         let mut backend_options = wgpu::BackendOptions::default();
         if want_transparency {
             backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
@@ -164,6 +185,10 @@ impl GpuRenderer {
         // DX12 only in that case; otherwise let wgpu pick DX12 or Vulkan.
         let backends = if want_transparency && cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::DX12 | wgpu::Backends::VULKAN };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends, backend_options, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+        let make_surface = {
+            let (instance, target) = (instance.clone(), target.clone());
+            move || instance.create_surface(target.clone()).ok()
+        };
         let surface = instance.create_surface(target).map_err(|e| e.to_string())?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
@@ -180,6 +205,25 @@ impl GpuRenderer {
             ..Default::default()
         }))
         .map_err(|e| e.to_string())?;
+        // wgpu's default is to panic on any error; a lost device (sleep,
+        // driver reset, GPU switch) or a bad frame should not kill the app
+        let lost = Arc::new(AtomicBool::new(false));
+        {
+            let lost = lost.clone();
+            device.set_device_lost_callback(move |reason, msg| {
+                if reason != wgpu::DeviceLostReason::Destroyed {
+                    eprintln!("vibex: GPU device lost: {msg}");
+                }
+                lost.store(true, Ordering::Relaxed);
+            });
+        }
+        let errors = AtomicU32::new(0);
+        device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
+            // a broken frame repeats every frame: say it a few times only
+            if errors.fetch_add(1, Ordering::Relaxed) < 8 {
+                eprintln!("vibex: GPU error: {e}");
+            }
+        }));
 
         let caps = surface.get_capabilities(&adapter);
         // Non-sRGB format: blend in sRGB space like the CPU backend does.
@@ -202,17 +246,6 @@ impl GpuRenderer {
             label: Some("vibex shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glyph atlas"),
-            size: wgpu::Extent3d { width: ATLAS_SIZE, height: ATLAS_SIZE, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&Default::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
@@ -252,15 +285,7 @@ impl GpuRenderer {
                 },
             ],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vibex bind group"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
-            ],
-        });
+        let (texture, bind_group) = atlas_texture(&device, &layout, &uniforms, &sampler, ATLAS_SIZE);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vibex pipeline layout"),
             bind_group_layouts: &[Some(&layout)],
@@ -366,16 +391,20 @@ impl GpuRenderer {
             })
         });
         let max_texture = device.limits().max_texture_dimension_2d;
-        let instance_cap = 16 * 1024;
+        let instance_cap = MIN_INSTANCES;
         let instances = Self::instance_buffer(&device, instance_cap);
         Ok(Self {
             device,
             queue,
-            surface,
+            surface: Some(surface),
+            make_surface: Box::new(make_surface),
             config,
+            reconfigure: false,
+            lost,
             pipeline,
             bind_group,
             layout,
+            sampler,
             image_sampler,
             images: HashMap::new(),
             frame_no: 0,
@@ -384,8 +413,8 @@ impl GpuRenderer {
             instances,
             instance_cap,
             texture,
-            atlas: Atlas::new(),
-            font_generation: (0, 0),
+            atlas: Atlas::new(ATLAS_SIZE),
+            font_generation: (0, 0, 0),
             blur_pipeline,
             blur_layout,
             blur_params,
@@ -408,11 +437,46 @@ impl GpuRenderer {
         if width == 0 || height == 0 {
             return;
         }
+        // keep inside the device's limit (a window spanning huge monitors)
+        let (width, height) = (width.min(self.max_texture), height.min(self.max_texture));
         if self.config.width != width || self.config.height != height {
             self.config.width = width;
             self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
+            if let Some(s) = &self.surface {
+                s.configure(&self.device, &self.config);
+            }
         }
+    }
+
+    /// The GPU device is gone (driver reset, GPU unplugged or switched).
+    /// Frames are skipped from then on: make a new renderer or fall back
+    /// to the CPU one.
+    pub fn device_lost(&self) -> bool {
+        self.lost.load(Ordering::Relaxed)
+    }
+
+    /// Replace a lost surface (drop the old one first: the window can only
+    /// have one swapchain).
+    fn recreate_surface(&mut self) {
+        self.surface = None;
+        self.surface = (self.make_surface)();
+        if let Some(s) = &self.surface {
+            s.configure(&self.device, &self.config);
+        }
+    }
+
+    /// A bigger glyph atlas, when one frame's glyphs don't fit. False if it
+    /// can't grow.
+    fn grow_atlas(&mut self) -> bool {
+        let size = (self.atlas.size * 2).min(MAX_ATLAS_SIZE).min(self.max_texture);
+        if size <= self.atlas.size {
+            return false;
+        }
+        let (texture, bind_group) = atlas_texture(&self.device, &self.layout, &self.uniforms, &self.sampler, size);
+        self.texture = texture;
+        self.bind_group = bind_group;
+        self.atlas = Atlas::new(size);
+        true
     }
 
     /// Atlas entry for `key`, uploading the glyph on first use.
@@ -442,16 +506,20 @@ impl GpuRenderer {
     }
 
     /// Upload an image as a premultiplied texture (downscaled if it's larger
-    /// than the device allows); returns the scale applied to its size.
-    fn image_entry(&mut self, img: &vibex_term::image::ImageData) -> f32 {
+    /// than the device allows); returns the scale applied to its size, or
+    /// None for an image with no pixels.
+    fn image_entry(&mut self, img: &vibex_term::image::ImageData) -> Option<f32> {
+        if !crate::scene::image_ok(img) {
+            return None;
+        }
         let frame = self.frame_no;
         let max = self.max_texture.max(1);
         let scale = (max as f32 / img.width.max(img.height) as f32).min(1.0);
         if let Some(e) = self.images.get_mut(&img.uid) {
             e.last_used = frame;
-            return scale;
+            return Some(scale);
         }
-        let (w, h) = (((img.width as f32 * scale) as u32).max(1), ((img.height as f32 * scale) as u32).max(1));
+        let (w, h) = (((img.width as f32 * scale) as u32).clamp(1, max), ((img.height as f32 * scale) as u32).clamp(1, max));
         let mut data = Vec::with_capacity(w as usize * h as usize * 4);
         for y in 0..h {
             let sy = ((y as f32 + 0.5) / scale) as u32;
@@ -491,7 +559,7 @@ impl GpuRenderer {
         });
         let bytes = data.len();
         self.images.insert(img.uid, GpuImage { bind_group, _texture: texture, last_used: frame, bytes });
-        scale
+        Some(scale)
     }
 
     /// Drop textures of images that haven't been drawn for a while, and
@@ -575,14 +643,14 @@ impl GpuRenderer {
         }
     }
 
-    /// Build instances plus draw segments; None if the atlas filled up
-    /// mid-way.
-    fn build(&mut self, scene: &Scene, fonts: &mut FontSet) -> Option<(Vec<Instance>, Vec<Segment>, Option<Backdrop>)> {
+    /// Build instances plus draw segments. If the atlas fills up mid-way:
+    /// None when `strict`, else the glyphs that don't fit are left out.
+    fn build(&mut self, scene: &Scene, fonts: &mut FontSet, strict: bool) -> Option<(Vec<Instance>, Vec<Segment>, Option<Backdrop>)> {
         let mut out = Vec::with_capacity(scene.items.len() + 16);
         let mut segments: Vec<Segment> = vec![Segment { start: 0, clip: None, image: None }];
         let mut clip_now: Option<Clip> = None;
         let mut backdrop = None;
-        let s = ATLAS_SIZE as f32;
+        let s = self.atlas.size as f32;
         for item in &scene.items {
             match *item {
                 Item::Blur(rect, radius) => {
@@ -607,8 +675,8 @@ impl GpuRenderer {
                     }
                 }
                 Item::Image(im) => {
-                    let img = &scene.images[im.index as usize];
-                    let scale = self.image_entry(img);
+                    let Some(img) = scene.images.get(im.index as usize) else { continue };
+                    let Some(scale) = self.image_entry(img) else { continue };
                     let (tw, th) = ((img.width as f32 * scale).max(1.0), (img.height as f32 * scale).max(1.0));
                     let start = out.len() as u32;
                     match segments.last_mut() {
@@ -635,7 +703,12 @@ impl GpuRenderer {
                     kind: 0,
                 }),
                 Item::Glyph(g) => {
-                    let Some(e) = self.entry(fonts, g.key)? else { continue };
+                    let e = match self.entry(fonts, g.key) {
+                        Some(Some(e)) => e,
+                        Some(None) => continue,
+                        None if strict => return None,
+                        None => continue,
+                    };
                     let x = (g.x + e.xmin) as f32;
                     let y = (g.y - e.ymin - e.h as i32) as f32;
                     let inst = Instance {
@@ -658,28 +731,50 @@ impl GpuRenderer {
 
     /// Draw a frame. `opacity` applies to the default background only.
     pub fn render(&mut self, scene: &Scene, fonts: &mut FontSet, opacity: f32) {
+        if self.device_lost() {
+            return;
+        }
         self.frame_no += 1;
         if fonts.generation() != self.font_generation {
             self.font_generation = fonts.generation();
             self.atlas.clear();
         }
-        let (mut instances, segments, backdrop) = match self.build(scene, fonts) {
-            Some(i) => i,
+        let built = match self.build(scene, fonts, true) {
+            Some(b) => Some(b),
             None => {
                 // atlas full: start over with only this frame's glyphs
                 self.atlas.clear();
-                match self.build(scene, fonts) {
-                    Some(i) => i,
-                    None => return,
-                }
+                self.build(scene, fonts, true)
+            }
+        };
+        let (mut instances, segments, backdrop) = match built {
+            Some(b) => b,
+            None => {
+                // more glyphs than the atlas holds: a bigger one, and if
+                // even that is full, the frame without the rest
+                self.grow_atlas();
+                self.atlas.clear();
+                self.build(scene, fonts, false).unwrap_or_default()
             }
         };
 
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
-            _ => {
-                self.surface.configure(&self.device, &self.config);
+        let Some(surface) = &self.surface else {
+            self.recreate_surface();
+            return;
+        };
+        let frame = match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                self.reconfigure = true;
+                t
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Validation => return,
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                surface.configure(&self.device, &self.config);
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                self.recreate_surface();
                 return;
             }
         };
@@ -700,9 +795,9 @@ impl GpuRenderer {
             }
             self.blur_targets();
         }
-        if instances.len() > self.instance_cap {
-            self.instance_cap = instances.len().next_power_of_two();
-            self.instances = Self::instance_buffer(&self.device, self.instance_cap);
+        if let Some(cap) = instance_cap(self.instance_cap, instances.len()) {
+            self.instance_cap = cap;
+            self.instances = Self::instance_buffer(&self.device, cap);
         }
         if !instances.is_empty() {
             self.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
@@ -757,7 +852,7 @@ impl GpuRenderer {
                 let (w, h) = (self.config.width, self.config.height);
                 let r = bd.rect;
                 let (rx0, ry0) = (r.x.clamp(0, w as i32) as u32, r.y.clamp(0, h as i32) as u32);
-                let (rx1, ry1) = ((r.x + r.w as i32).clamp(0, w as i32) as u32, (r.y + r.h as i32).clamp(0, h as i32) as u32);
+                let (rx1, ry1) = (r.x.saturating_add_unsigned(r.w).clamp(0, w as i32) as u32, r.y.saturating_add_unsigned(r.h).clamp(0, h as i32) as u32);
                 pass.set_bind_group(0, &bt.scene_quad, &[]);
                 for (x0, y0, x1, y1) in [(0, 0, w, ry0), (0, ry1, w, h), (0, ry0, rx0, ry1), (rx1, ry0, w, ry1)] {
                     if x1 > x0 && y1 > y0 {
@@ -781,8 +876,55 @@ impl GpuRenderer {
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
+        if std::mem::take(&mut self.reconfigure) {
+            if let Some(s) = &self.surface {
+                s.configure(&self.device, &self.config);
+            }
+        }
         self.evict_images();
     }
+}
+
+/// The glyph atlas texture and the bind group that samples it.
+fn atlas_texture(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniforms: &wgpu::Buffer,
+    sampler: &wgpu::Sampler,
+    size: u32,
+) -> (wgpu::Texture, wgpu::BindGroup) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glyph atlas"),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vibex bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    });
+    (texture, bind_group)
+}
+
+/// A new instance buffer size, if `cap` doesn't suit `n` instances: grow to
+/// fit, or shrink after a frame much smaller than the buffer (one huge frame
+/// shouldn't keep its buffer forever).
+fn instance_cap(cap: usize, n: usize) -> Option<usize> {
+    if n > cap {
+        return Some(n.next_power_of_two());
+    }
+    let want = n.next_power_of_two().max(MIN_INSTANCES);
+    (cap > MIN_INSTANCES && want * 4 <= cap).then_some(want)
 }
 
 /// A clip as a scissor rectangle inside the target; None when empty.
@@ -792,10 +934,51 @@ fn scissor(clip: Option<Clip>, sw: u32, sh: u32) -> Option<(u32, u32, u32, u32)>
         Some(c) => {
             let x0 = c.x.clamp(0, sw as i32) as u32;
             let y0 = c.y.clamp(0, sh as i32) as u32;
-            let x1 = (c.x + c.w as i32).clamp(0, sw as i32) as u32;
-            let y1 = (c.y + c.h as i32).clamp(0, sh as i32) as u32;
+            let x1 = c.x.saturating_add_unsigned(c.w).clamp(0, sw as i32) as u32;
+            let y1 = c.y.saturating_add_unsigned(c.h).clamp(0, sh as i32) as u32;
             (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
         }
     };
     (w > 0 && h > 0).then_some((x, y, w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atlas_fills_up_then_clears() {
+        let mut a = Atlas::new(64);
+        // 31x31 + gutter: four fit in 64x64, the fifth doesn't
+        for _ in 0..4 {
+            assert!(a.alloc(31, 31).is_some());
+        }
+        assert_eq!(a.alloc(31, 31), None);
+        assert_eq!(a.alloc(u32::MAX, 1), None, "no overflow on a huge glyph");
+        a.clear();
+        assert_eq!(a.size, 64);
+        assert_eq!(a.alloc(31, 31), Some((0, 0)));
+    }
+
+    #[test]
+    fn instance_buffer_grows_and_shrinks_back() {
+        assert_eq!(instance_cap(MIN_INSTANCES, 100), None);
+        assert_eq!(instance_cap(MIN_INSTANCES, MIN_INSTANCES + 1), Some(MIN_INSTANCES * 2));
+        // after one huge frame, an ordinary one gives the memory back
+        let big = 1 << 22;
+        assert_eq!(instance_cap(big, 5000), Some(MIN_INSTANCES));
+        // but not for a frame that still needs a good part of it
+        assert_eq!(instance_cap(big, big / 2), None);
+    }
+
+    #[test]
+    fn scissor_survives_huge_and_negative_clips() {
+        assert_eq!(scissor(None, 0, 10), None);
+        let c = Clip { x: i32::MAX - 5, y: 0, w: u32::MAX, h: 10 };
+        assert_eq!(scissor(Some(c), 100, 100), None);
+        let c = Clip { x: -50, y: -50, w: u32::MAX, h: u32::MAX };
+        assert_eq!(scissor(Some(c), 100, 80), Some((0, 0, 100, 80)));
+        let c = Clip { x: 10, y: 10, w: 0, h: 5 };
+        assert_eq!(scissor(Some(c), 100, 80), None);
+    }
 }

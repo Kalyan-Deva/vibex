@@ -98,9 +98,24 @@ impl PseudoConsole {
 
 pub struct Pty {
     hpc: Option<PseudoConsole>,
-    input: OwnedHandle,
+    /// Input goes through a writer thread: a console host that stops reading
+    /// (hung, or a huge paste) blocks that thread, never the window.
+    input: std::sync::mpsc::Sender<Vec<u8>>,
     process: Arc<OwnedHandle>,
     _thread: OwnedHandle,
+}
+
+/// Write all of `data` to a pipe (blocking).
+fn write_all(pipe: &OwnedHandle, mut data: &[u8]) -> Result<()> {
+    while !data.is_empty() {
+        let mut n: u32 = 0;
+        let ok = unsafe { WriteFile(pipe.0, data.as_ptr(), data.len() as u32, &mut n, null_mut()) };
+        if ok == 0 {
+            return Err(last_err());
+        }
+        data = &data[n as usize..];
+    }
+    Ok(())
 }
 
 fn last_err() -> io::Error {
@@ -272,20 +287,27 @@ impl Pty {
             })?;
         }
 
-        Ok(Pty { hpc: Some(pc), input: in_write, process, _thread: thread_handle })
+        // one writer per pane keeps the bytes in order
+        let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
+        thread::Builder::new().name("vibex-pty-write".into()).spawn(move || {
+            let pipe = in_write;
+            for data in queue {
+                if write_all(&pipe, &data).is_err() {
+                    // the console host is gone: drop the rest
+                    break;
+                }
+            }
+        })?;
+        Ok(Pty { hpc: Some(pc), input, process, _thread: thread_handle })
     }
 
-    /// Send bytes to the child (keyboard input, replies).
-    pub fn write(&self, mut data: &[u8]) -> Result<()> {
-        while !data.is_empty() {
-            let mut n: u32 = 0;
-            let ok = unsafe { WriteFile(self.input.0, data.as_ptr(), data.len() as u32, &mut n, null_mut()) };
-            if ok == 0 {
-                return Err(last_err());
-            }
-            data = &data[n as usize..];
+    /// Send bytes to the child (keyboard input, replies). Queued for the
+    /// writer thread; an error only once the pane's input has closed.
+    pub fn write(&self, data: &[u8]) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        self.input.send(data.to_vec()).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the pane's input is closed"))
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -372,6 +394,34 @@ mod tests {
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("vibex-pty-ok"), "output was: {text:?}");
         assert!(exited);
+    }
+
+    #[test]
+    fn a_huge_write_never_blocks_the_caller() {
+        // a program that doesn't read its input for a while: 20 MB goes in
+        // at once, the call returns straight away, and later input still
+        // arrives in order
+        let (tx, rx) = mpsc::channel();
+        let cmd = Command::new("powershell.exe")
+            .arg("-NoLogo")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("Start-Sleep -Milliseconds 1500; $l = [Console]::In.ReadLine(); \"got=$($l.Length)\"");
+        let pty = Pty::spawn(&cmd, 80, 24, tx, || {}).expect("spawn");
+        let start = Instant::now();
+        pty.write(&vec![b'x'; 20 << 20]).unwrap();
+        assert!(start.elapsed() < Duration::from_millis(500), "write blocked for {:?}", start.elapsed());
+        pty.kill();
+        // after the pane is gone, writes don't block either
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if let Ok(PtyEvent::Exited(_)) = rx.recv_timeout(Duration::from_millis(200)) {
+                break;
+            }
+        }
+        let start = Instant::now();
+        let _ = pty.write(b"after\r");
+        assert!(start.elapsed() < Duration::from_millis(500));
     }
 
     /// Runs on whichever host `VIBEX_OPENCONSOLE` / `VIBEX_CONPTY` select.

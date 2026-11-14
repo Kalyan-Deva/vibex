@@ -69,10 +69,133 @@ pub struct Engine {
     lua: Lua,
     callbacks: Vec<RegistryKey>,
     handlers: HashMap<String, Vec<RegistryKey>>,
+    watchdog: Rc<Watchdog>,
 }
 
 fn rt(msg: impl Into<String>) -> mlua::Error {
     mlua::Error::RuntimeError(msg.into())
+}
+
+/// Lua runs on the UI thread: a call (or loading vibex.lua) that runs
+/// longer than this is stopped, so a stuck loop can't freeze every window.
+const LUA_LIMIT: Duration = Duration::from_millis(250);
+pub const TIMEOUT_CALL: &str = "vibex.lua: a callback ran too long (stopped after 250 ms)";
+pub const TIMEOUT_LOAD: &str = "vibex.lua took too long to load (stopped after 250 ms)";
+
+/// When the running call must stop, and whether one was stopped.
+#[derive(Default)]
+struct Watchdog {
+    deadline: std::cell::Cell<Option<std::time::Instant>>,
+    fired: std::cell::Cell<bool>,
+}
+
+/// Disarms the watchdog when the call is over.
+struct Armed(Rc<Watchdog>);
+
+impl Drop for Armed {
+    fn drop(&mut self) {
+        self.0.deadline.set(None);
+        CO_DEADLINE.with(|d| d.set(None));
+    }
+}
+
+impl Watchdog {
+    fn arm(self: &Rc<Self>, lua: &Lua, limit: Duration) -> Armed {
+        if self.fired.replace(false) {
+            // the last call was stopped: back to the cheap check
+            watch(lua, self.clone(), WATCH_EVERY);
+        }
+        let due = std::time::Instant::now() + limit;
+        self.deadline.set(Some(due));
+        CO_DEADLINE.with(|d| d.set(Some(due)));
+        CO_FIRED.with(|f| f.set(false));
+        Armed(self.clone())
+    }
+}
+
+/// Instructions between deadline checks.
+const WATCH_EVERY: u32 = 10_000;
+
+/// Check the watchdog's deadline every `every` instructions.
+fn watch(lua: &Lua, dog: Rc<Watchdog>, every: u32) {
+    lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(every), move |lua, _| match dog.deadline.get() {
+        Some(t) if std::time::Instant::now() >= t => {
+            if !dog.fired.replace(true) {
+                // from now on every instruction fails, so a script that
+                // pcalls its loop can't keep catching the error: it gets
+                // raised in the outermost function too
+                watch(lua, dog.clone(), 1);
+            }
+            Err(rt(TIMEOUT_CALL))
+        }
+        _ => Ok(mlua::VmState::Continue),
+    });
+}
+
+/// A Lua state whose instruction hook enforces the watchdog's deadline.
+fn watched_lua() -> (Lua, Rc<Watchdog>) {
+    let lua = Lua::new();
+    let dog = Rc::new(Watchdog::default());
+    watch(&lua, dog.clone(), WATCH_EVERY);
+    if let Err(e) = watch_coroutines(&lua) {
+        eprintln!("vibex: lua watchdog for coroutines: {e}");
+    }
+    (lua, dog)
+}
+
+// mlua keeps one hook, for one Lua thread: a loop inside a coroutine runs
+// past it. So every coroutine gets a small hook of its own (plain Lua API)
+// that checks the same deadline. Lua runs on the UI thread only, so the
+// deadline lives in thread-locals.
+thread_local! {
+    static CO_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    static CO_FIRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+unsafe extern "C-unwind" fn coroutine_hook(state: *mut mlua::ffi::lua_State, _ar: *mut mlua::ffi::lua_Debug) {
+    let due = CO_DEADLINE.with(|d| d.get()).is_some_and(|t| std::time::Instant::now() >= t);
+    if due {
+        CO_FIRED.with(|f| f.set(true));
+        // every instruction fails from here, so a pcall'd loop can't go on
+        mlua::ffi::lua_sethook(state, Some(coroutine_hook), mlua::ffi::LUA_MASKCOUNT, 1);
+        mlua::ffi::lua_pushlstring(state, TIMEOUT_CALL.as_ptr().cast(), TIMEOUT_CALL.len());
+        mlua::ffi::lua_error(state);
+    }
+}
+
+/// `coroutine.create` (and `wrap`, built on it) with the deadline check.
+fn watch_coroutines(lua: &Lua) -> mlua::Result<()> {
+    let create = lua.create_function(|lua, f: Function| {
+        let th = lua.create_thread(f)?;
+        // SAFETY: only reads the thread just pushed and sets its hook
+        unsafe {
+            lua.exec_raw::<()>(th.clone(), |state| {
+                let co = mlua::ffi::lua_tothread(state, -1);
+                if !co.is_null() {
+                    mlua::ffi::lua_sethook(co, Some(coroutine_hook), mlua::ffi::LUA_MASKCOUNT, WATCH_EVERY as i32);
+                }
+                mlua::ffi::lua_pop(state, 1);
+            })?;
+        }
+        Ok(th)
+    })?;
+    let co: Table = lua.globals().get("coroutine")?;
+    co.set("create", create)?;
+    lua.load(
+        r#"
+        local create, resume = coroutine.create, coroutine.resume
+        coroutine.wrap = function(f)
+            local co = create(f)
+            return function(...)
+                local r = table.pack(resume(co, ...))
+                if not r[1] then error(r[2], 2) end
+                return table.unpack(r, 2, r.n)
+            end
+        end
+        "#,
+    )
+    .set_name("vibex coroutines")
+    .exec()
 }
 
 // ------------------------------------------------------------- win object
@@ -209,7 +332,17 @@ pub const EVENTS: &[&str] = &["startup", "config-reloaded", "title-changed", "fo
 impl Engine {
     /// An engine with no user config (defaults only).
     pub fn empty() -> Engine {
-        Engine { lua: Lua::new(), callbacks: Vec::new(), handlers: HashMap::new() }
+        let (lua, watchdog) = watched_lua();
+        Engine { lua, callbacks: Vec::new(), handlers: HashMap::new(), watchdog }
+    }
+
+    /// The message for a failed call: the watchdog's if it stopped it.
+    fn call_error(&self, context: &str, e: &mlua::Error) -> String {
+        if self.watchdog.fired.get() || CO_FIRED.with(|f| f.get()) {
+            TIMEOUT_CALL.to_string()
+        } else {
+            format!("{context}{}", clean_error(&e.to_string()))
+        }
     }
 
     /// Load `path` (if it exists) on top of the defaults.
@@ -224,20 +357,23 @@ impl Engine {
         let src = without_bom(&src);
         let mut engine = Engine::empty();
         engine.install().map_err(|e| e.to_string())?;
+        let _armed = engine.watchdog.arm(&engine.lua, LUA_LIMIT);
+        let timed_out = |dog: &Watchdog, e: String| if dog.fired.get() { TIMEOUT_LOAD.to_string() } else { e };
         // let `require` find helper modules next to vibex.lua
         if let Some(dir) = path.parent() {
             let pkg: Table = engine.lua.globals().get("package").map_err(|e| e.to_string())?;
             let cur: String = pkg.get("path").unwrap_or_default();
             let _ = pkg.set("path", format!("{}\\?.lua;{cur}", dir.display()));
         }
-        let value: Value = engine.lua.load(src).set_name("vibex.lua").eval().map_err(|e| clean_error(&e.to_string()))?;
+        let value: Value = engine.lua.load(src).set_name("vibex.lua").eval().map_err(|e| timed_out(&engine.watchdog, clean_error(&e.to_string())))?;
         let table = match value {
             Value::Table(t) => t,
             Value::Nil => return Err("vibex.lua must `return` a config table".into()),
             other => return Err(format!("vibex.lua returned a {}, expected a table", other.type_name())),
         };
-        engine.apply(&table, &mut config)?;
-        engine.collect_handlers().map_err(|e| e.to_string())?;
+        let dog = engine.watchdog.clone();
+        engine.apply(&table, &mut config).map_err(|e| timed_out(&dog, e))?;
+        engine.collect_handlers().map_err(|e| timed_out(&dog, e.to_string()))?;
         Ok((engine, config))
     }
 
@@ -290,7 +426,8 @@ impl Engine {
         let key = self.callbacks.get(idx).ok_or("stale trigger")?;
         let f: Function = self.lua.registry_value(key).map_err(|e| e.to_string())?;
         let (win, cmds) = self.win(snap).map_err(|e| e.to_string())?;
-        f.call::<()>((win, text.to_string())).map_err(|e| clean_error(&e.to_string()))?;
+        let _armed = self.watchdog.arm(&self.lua, LUA_LIMIT);
+        f.call::<()>((win, text.to_string())).map_err(|e| self.call_error("", &e))?;
         Ok(Self::take(cmds))
     }
 
@@ -298,7 +435,8 @@ impl Engine {
         let key = self.callbacks.get(idx).ok_or("stale key binding")?;
         let f: Function = self.lua.registry_value(key).map_err(|e| e.to_string())?;
         let (win, cmds) = self.win(snap).map_err(|e| e.to_string())?;
-        f.call::<()>(win).map_err(|e| clean_error(&e.to_string()))?;
+        let _armed = self.watchdog.arm(&self.lua, LUA_LIMIT);
+        f.call::<()>(win).map_err(|e| self.call_error("", &e))?;
         Ok(Self::take(cmds))
     }
 
@@ -308,12 +446,14 @@ impl Engine {
         let (win, cmds) = self.win(snap).map_err(|e| e.to_string())?;
         for key in list {
             let f: Function = self.lua.registry_value(key).map_err(|e| e.to_string())?;
+            // each handler gets the full time
+            let _armed = self.watchdog.arm(&self.lua, LUA_LIMIT);
             let r = match &arg {
                 EventArg::None => f.call::<()>(win.clone()),
                 EventArg::Str(s) => f.call::<()>((win.clone(), s.clone())),
                 EventArg::Bool(b) => f.call::<()>((win.clone(), *b)),
             };
-            r.map_err(|e| format!("{event} handler: {}", clean_error(&e.to_string())))?;
+            r.map_err(|e| self.call_error(&format!("{event} handler: "), &e))?;
         }
         Ok(Self::take(cmds))
     }
@@ -323,7 +463,8 @@ impl Engine {
         let Some(key) = self.handlers.get("update-status").and_then(|l| l.last()) else { return Ok(None) };
         let f: Function = self.lua.registry_value(key).map_err(|e| e.to_string())?;
         let (win, cmds) = self.win(snap).map_err(|e| e.to_string())?;
-        let v: Value = f.call(win).map_err(|e| format!("update-status: {}", clean_error(&e.to_string())))?;
+        let _armed = self.watchdog.arm(&self.lua, LUA_LIMIT);
+        let v: Value = f.call(win).map_err(|e| self.call_error("update-status: ", &e))?;
         let line = parse_status(&v).map_err(|e| format!("update-status: {e}"))?;
         Ok(Some((line, Self::take(cmds))))
     }
@@ -1342,5 +1483,65 @@ mod tests {
         let Action::Callback(idx) = keys::find(&c.bindings, &KeySpec::Char('x'), Mods::parse("CTRL|ALT").unwrap()).unwrap().action else { panic!() };
         let e = engine.call(idx, Snapshot::default()).err().unwrap();
         assert!(e.contains("boom"), "{e}");
+    }
+
+    #[test]
+    fn a_stuck_callback_is_stopped() {
+        // a plain loop, and one that tries to pcall its way past the stop
+        let src = r#"
+            vibex.on("bell", function(win) while true do end end)
+            return { keys = {
+                { key = "x", mods = "CTRL|ALT", action = function(win) while true do pcall(function() while true do end end) end end },
+                { key = "y", mods = "CTRL|ALT", action = function(win) win:toast("hi") end },
+            } }"#;
+        let (engine, c) = load_src(src).unwrap();
+        let cb = |k| match keys::find(&c.bindings, &KeySpec::Char(k), Mods::parse("CTRL|ALT").unwrap()).unwrap().action {
+            Action::Callback(idx) => idx,
+            _ => panic!(),
+        };
+        let t = std::time::Instant::now();
+        let e = engine.call(cb('x'), Snapshot::default()).err().unwrap();
+        assert_eq!(e, TIMEOUT_CALL);
+        assert!(t.elapsed() < Duration::from_secs(5));
+        let e = engine.emit("bell", Snapshot::default(), EventArg::None).err().unwrap();
+        assert_eq!(e, TIMEOUT_CALL);
+        // the next call starts with a fresh deadline
+        let cmds = engine.call(cb('y'), Snapshot::default()).unwrap();
+        assert!(matches!(cmds.as_slice(), [Cmd::Toast(m, _)] if m == "hi"));
+        let e = load_src("while true do end").err().unwrap();
+        assert_eq!(e, TIMEOUT_LOAD);
+    }
+
+    #[test]
+    fn a_stuck_coroutine_is_stopped_too() {
+        let src = r#"
+            return { keys = {
+                { key = "c", mods = "CTRL|ALT", action = function(win) coroutine.wrap(function() while true do end end)() end },
+                { key = "d", mods = "CTRL|ALT", action = function(win)
+                    local co = coroutine.create(function() while true do pcall(function() while true do end end) end end)
+                    while true do coroutine.resume(co) end
+                end },
+            } }"#;
+        let (engine, c) = load_src(src).unwrap();
+        let cb = |k| match keys::find(&c.bindings, &KeySpec::Char(k), Mods::parse("CTRL|ALT").unwrap()).unwrap().action {
+            Action::Callback(idx) => idx,
+            _ => panic!(),
+        };
+        for k in ['c', 'd'] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let start = std::time::Instant::now();
+            // on this thread (the engine isn't Send); fail the test instead of hanging forever
+            let watchdog = std::thread::spawn(move || {
+                if rx.recv_timeout(Duration::from_secs(10)).is_err() {
+                    eprintln!("coroutine loop '{k}' never stopped");
+                    std::process::exit(3);
+                }
+            });
+            let r = engine.call(cb(k), Snapshot::default());
+            let _ = tx.send(());
+            watchdog.join().unwrap();
+            assert!(r.is_err(), "'{k}' should have been stopped");
+            assert!(start.elapsed() < Duration::from_secs(5), "'{k}' took {:?}", start.elapsed());
+        }
     }
 }

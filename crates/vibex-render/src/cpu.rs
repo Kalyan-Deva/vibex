@@ -15,11 +15,12 @@ pub struct Frame<'a> {
 type Bounds = (i32, i32, i32, i32);
 
 impl Frame<'_> {
+    #[allow(clippy::too_many_arguments)]
     fn fill(&mut self, clip: Bounds, x: i32, y: i32, w: u32, h: u32, color: u32, alpha: u8) {
         let x0 = x.max(clip.0).max(0) as usize;
         let y0 = y.max(clip.1).max(0) as usize;
-        let x1 = ((x + w as i32).min(clip.2).max(0) as usize).min(self.width);
-        let y1 = ((y + h as i32).min(clip.3).max(0) as usize).min(self.height);
+        let x1 = (x.saturating_add_unsigned(w).min(clip.2).max(0) as usize).min(self.width);
+        let y1 = (y.saturating_add_unsigned(h).min(clip.3).max(0) as usize).min(self.height);
         if x0 >= x1 {
             return;
         }
@@ -40,9 +41,9 @@ impl Frame<'_> {
     fn image(&mut self, clip: Bounds, img: &vibex_term::image::ImageData, it: &crate::scene::ImageItem) {
         let x0 = it.x.max(clip.0).max(0);
         let y0 = it.y.max(clip.1).max(0);
-        let x1 = (it.x + it.w as i32).min(clip.2).min(self.width as i32);
-        let y1 = (it.y + it.h as i32).min(clip.3).min(self.height as i32);
-        if x0 >= x1 || y0 >= y1 {
+        let x1 = it.x.saturating_add_unsigned(it.w).min(clip.2).min(self.width as i32);
+        let y1 = it.y.saturating_add_unsigned(it.h).min(clip.3).min(self.height as i32);
+        if x0 >= x1 || y0 >= y1 || !crate::scene::image_ok(img) {
             return;
         }
         let (iw, ih) = (img.width as i32, img.height as i32);
@@ -70,8 +71,8 @@ impl Frame<'_> {
     fn blur(&mut self, c: crate::scene::Clip, radius: f32) {
         let x0 = c.x.max(0) as usize;
         let y0 = c.y.max(0) as usize;
-        let x1 = ((c.x + c.w as i32).max(0) as usize).min(self.width);
-        let y1 = ((c.y + c.h as i32).max(0) as usize).min(self.height);
+        let x1 = (c.x.saturating_add_unsigned(c.w).max(0) as usize).min(self.width);
+        let y1 = (c.y.saturating_add_unsigned(c.h).max(0) as usize).min(self.height);
         if x0 >= x1 || y0 >= y1 {
             return;
         }
@@ -127,16 +128,25 @@ fn box_line(px: &mut [u32], step: usize, n: usize, r: usize, tmp: &mut Vec<u32>)
 
 pub fn draw(scene: &Scene, fonts: &mut FontSet, frame: &mut Frame) {
     frame.pixels.fill(scene.background);
+    // never index past the buffer, whatever size we were told it is
+    if frame.width == 0 {
+        return;
+    }
+    frame.height = frame.height.min(frame.pixels.len() / frame.width);
     let full: Bounds = (0, 0, frame.width as i32, frame.height as i32);
     let mut clip = full;
     for item in &scene.items {
         match *item {
             Item::Clip(c) => {
-                clip = c.map_or(full, |c| (c.x, c.y, c.x + c.w as i32, c.y + c.h as i32));
+                clip = c.map_or(full, |c| (c.x, c.y, c.x.saturating_add_unsigned(c.w), c.y.saturating_add_unsigned(c.h)));
             }
             Item::Rect(r) => frame.fill(clip, r.x, r.y, r.w, r.h, r.color, r.alpha),
             Item::Blur(c, radius) => frame.blur(c, radius),
-            Item::Image(im) => frame.image(clip, &scene.images[im.index as usize], &im),
+            Item::Image(im) => {
+                if let Some(img) = scene.images.get(im.index as usize) {
+                    frame.image(clip, img, &im);
+                }
+            }
             Item::Glyph(g) => {
                 let glyph = fonts.glyph(g.key);
                 let gx = g.x + glyph.xmin;

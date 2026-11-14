@@ -5,11 +5,23 @@
 // still compiles (so `cargo test --workspace` works) but refuses to install.
 use std::path::PathBuf;
 
+/// `VIBEX_*_PAYLOAD` names a file to embed. Set but missing (a typo, or a
+/// relative path: build scripts run in the crate folder) is an error, not
+/// a setup that quietly lacks it.
+fn payload_var(name: &str) -> Option<PathBuf> {
+    println!("cargo:rerun-if-env-changed={name}");
+    let p = PathBuf::from(std::env::var_os(name).filter(|v| !v.is_empty())?);
+    if !p.is_file() {
+        panic!("{name} = {} is not a file (use an absolute path)", p.display());
+    }
+    Some(p)
+}
+
 fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     // OUT_DIR = <target>/<profile>/build/vibex-setup-<hash>/out
     let profile_dir = out.ancestors().nth(3).map(PathBuf::from);
-    let payload = std::env::var("VIBEX_PAYLOAD").map(PathBuf::from).ok().or_else(|| profile_dir.map(|d| d.join("vibex.exe"))).filter(|p| p.is_file());
+    let payload = payload_var("VIBEX_PAYLOAD").or_else(|| profile_dir.map(|d| d.join("vibex.exe")).filter(|p| p.is_file()));
 
     let dest = out.join("payload.bin");
     match &payload {
@@ -24,10 +36,9 @@ fn main() {
             println!("cargo:warning=vibex-setup: no vibex.exe payload found; build vibex --release first");
         }
     }
-    println!("cargo:rerun-if-env-changed=VIBEX_PAYLOAD");
 
     // Optional: OpenConsole.exe (newer console host, passes images through)
-    let oc = std::env::var("VIBEX_OPENCONSOLE_PAYLOAD").map(PathBuf::from).ok().filter(|p| p.is_file());
+    let oc = payload_var("VIBEX_OPENCONSOLE_PAYLOAD");
     let oc_dest = out.join("openconsole.bin");
     match &oc {
         Some(p) => {
@@ -36,10 +47,9 @@ fn main() {
         }
         None => std::fs::write(&oc_dest, b"").unwrap(),
     }
-    println!("cargo:rerun-if-env-changed=VIBEX_OPENCONSOLE_PAYLOAD");
 
     // Optional: vibex.com, the console-side `vibex` (shells wait for it)
-    let launcher = std::env::var("VIBEX_LAUNCHER_PAYLOAD").map(PathBuf::from).ok().filter(|p| p.is_file());
+    let launcher = payload_var("VIBEX_LAUNCHER_PAYLOAD");
     let launcher_dest = out.join("launcher.bin");
     match &launcher {
         Some(p) => {
@@ -48,10 +58,9 @@ fn main() {
         }
         None => std::fs::write(&launcher_dest, b"").unwrap(),
     }
-    println!("cargo:rerun-if-env-changed=VIBEX_LAUNCHER_PAYLOAD");
 
     // Optional: the bundled editors (nano, Neovim) as one zip of vendor\tools
-    let tools = std::env::var("VIBEX_TOOLS_PAYLOAD").map(PathBuf::from).ok().filter(|p| p.is_file());
+    let tools = payload_var("VIBEX_TOOLS_PAYLOAD");
     let tools_dest = out.join("tools.bin");
     match &tools {
         Some(p) => {
@@ -60,7 +69,13 @@ fn main() {
         }
         None => std::fs::write(&tools_dest, b"").unwrap(),
     }
-    println!("cargo:rerun-if-env-changed=VIBEX_TOOLS_PAYLOAD");
+
+    // The setup usually runs from Downloads: load the DLLs it imports from
+    // System32 only, never from the folder it sits in.
+    // (LOAD_LIBRARY_SEARCH_SYSTEM32; MSVC link.exe)
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+    }
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();

@@ -73,7 +73,14 @@ pub fn download(feed: Feed) -> Msg {
         return Msg::Failed(e);
     }
     let dir = std::env::temp_dir().join("vibex-update");
-    let path = dir.join(format!("Vibex-Setup-{}.exe", feed.version));
+    // earlier downloads (each ~30 MB) aren't needed any more; a name of
+    // its own for this one (an installer still running keeps its file)
+    if let Ok(old) = std::fs::read_dir(&dir) {
+        for f in old.flatten() {
+            let _ = std::fs::remove_file(f.path());
+        }
+    }
+    let path = dir.join(format!("Vibex-Setup-{}-{}.exe", feed.version, std::process::id()));
     if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &data)) {
         return Msg::Failed(format!("cannot save the update: {e}"));
     }

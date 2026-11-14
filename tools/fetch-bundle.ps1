@@ -24,10 +24,30 @@ $out = if ($Out) { $Out } else { Join-Path $root 'vendor\tools' }
 $tar = Join-Path $env:SystemRoot 'System32\tar.exe'   # bsdtar: zip and .zst
 New-Item -ItemType Directory -Force $cache | Out-Null
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is far slower with it
 
-$items = Get-Content $lockFile | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object {
-    $f = $_ -split '\s+'
-    [pscustomobject]@{ Name = $f[0]; Version = $f[1]; Sha = $f[2].ToLower(); Url = $f[3]; File = Join-Path $cache (Split-Path $f[3] -Leaf) }
+# Windows PowerShell turns any stderr line of a redirected native command
+# into a terminating error under 'Stop'; judge tar by its exit code instead.
+function Expand-With-Tar($archive, $dest) {
+    $ErrorActionPreference = 'Continue'
+    & $tar -xf $archive -C $dest 2>$null
+    if ($LASTEXITCODE) { throw "unpacking $archive failed (tar exit code $LASTEXITCODE)" }
+}
+
+# The lock file may come from Vibex's editor updater: check every field
+# before it names a download or a file.
+$items = Get-Content $lockFile | Where-Object { $_.Trim() -and $_ -notmatch '^\s*#' } | ForEach-Object {
+    $f = @($_.Trim() -split '\s+')
+    if ($f.Count -ne 4) { throw "${lockFile}: want 'name version sha256 url', got: $_" }
+    if ($f[0] -notmatch '^[A-Za-z0-9._+-]+$' -or $f[1] -notmatch '^[A-Za-z0-9._+-]+$') { throw "${lockFile}: bad name or version: $_" }
+    if ($f[2] -notmatch '^[0-9A-Fa-f]{64}$') { throw "${lockFile}: bad SHA-256: $_" }
+    if ($f[3] -notmatch '^https://[^\s?#]+$') { throw "${lockFile}: the URL must be https: $_" }
+    $leaf = Split-Path $f[3] -Leaf
+    if ($leaf -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]*$') { throw "${lockFile}: bad file name '$leaf'" }
+    [pscustomobject]@{ Name = $f[0]; Version = $f[1]; Sha = $f[2].ToLower(); Url = $f[3]; File = Join-Path $cache $leaf }
+}
+foreach ($need in 'nvim', 'nano') {
+    if (@($items | Where-Object Name -eq $need).Count -ne 1) { throw "${lockFile}: needs exactly one '$need' line" }
 }
 
 foreach ($i in $items) {
@@ -51,13 +71,13 @@ $nv = $items | Where-Object Name -eq 'nvim'
 $stage = Join-Path $cache 'stage-nvim'
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory $stage | Out-Null
-& $tar -xf $nv.File -C $stage
-if ($LASTEXITCODE) { throw 'unpacking Neovim failed' }
+Expand-With-Tar $nv.File $stage
 $top = Get-ChildItem $stage -Directory | Select-Object -First 1
 Move-Item $top.FullName (Join-Path $out 'nvim')
 $nvLicense = Get-ChildItem (Join-Path $out 'nvim') -Recurse -File -Include 'LICENSE*', 'license*' -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $nvLicense) {
     # the Windows zip has no licence file of its own: Apache-2.0 + Vim licence
+    # (a text file shipped as-is, never run, so not pinned in the lock)
     Invoke-WebRequest -Uri "https://raw.githubusercontent.com/neovim/neovim/v$($nv.Version)/LICENSE.txt" -OutFile (Join-Path $out 'LICENSES\neovim.txt') -UseBasicParsing -UserAgent 'vibex-build'
 } else { Copy-Item $nvLicense.FullName (Join-Path $out 'LICENSES\neovim.txt') }
 
@@ -66,8 +86,7 @@ $stage = Join-Path $cache 'stage-msys'
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory $stage | Out-Null
 foreach ($i in $items | Where-Object Name -ne 'nvim') {
-    & $tar -xf $i.File -C $stage 2>$null
-    if ($LASTEXITCODE) { throw "unpacking $($i.Name) failed" }
+    Expand-With-Tar $i.File $stage
 }
 $nano = Join-Path $out 'nano'
 $bin = Join-Path $nano 'usr\bin'

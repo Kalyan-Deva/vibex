@@ -145,7 +145,9 @@ pub fn panel(scene: &mut Scene, theme: &Theme, r: PxRect, s: f32) {
             // keep the rounded corners
             fill(scene, PxRect { h: band.h + radius, ..band }, radius, t, a / 2);
         } else {
-            scene.frect(PxRect { x: r.x + 1.0, ..band }, t, a);
+            // inside the 1px edge and the rounded corners, not past the right side
+            let ins = round_top_inset(radius, y - r.y);
+            scene.frect(PxRect { x: r.x + 1.0 + ins, w: r.w - 2.0 - 2.0 * ins, ..band }, t, a);
         }
     }
     ring(scene, r, radius, t, 34);

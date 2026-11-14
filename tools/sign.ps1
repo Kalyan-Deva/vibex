@@ -21,6 +21,7 @@ if (-not $signtool) {
 if (-not $signtool) { throw "signtool.exe not found: install the Windows SDK (Signing Tools)" }
 
 foreach ($f in $Files) {
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "no such file: $f" }
     & $signtool sign /sha1 $Thumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 /d 'Vibex Terminal' $f
     if ($LASTEXITCODE) { throw "signing $f failed" }
     & $signtool verify /pa $f | Out-Null

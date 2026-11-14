@@ -303,6 +303,10 @@ pub fn theme_order() -> Vec<&'static str> {
 }
 
 fn cycle<T: PartialEq + Clone>(list: &[T], current: &T, dir: i32) -> T {
+    // nothing to choose from (no fonts found, say): stay put
+    if list.is_empty() {
+        return current.clone();
+    }
     let n = list.len() as i32;
     let i = list.iter().position(|x| x == current).map_or(0, |i| i as i32);
     list[((i + dir).rem_euclid(n.max(1))) as usize].clone()
@@ -951,6 +955,15 @@ impl SettingsUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cycle_wraps_and_survives_an_empty_list() {
+        let l = ["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(cycle(&l, &"a".to_string(), -1), "c");
+        assert_eq!(cycle(&l, &"c".to_string(), 1), "a");
+        let none: [String; 0] = [];
+        assert_eq!(cycle(&none, &"Cascadia".to_string(), 1), "Cascadia");
+    }
 
     fn ui_on(page: Page) -> (SettingsUi, Config, Settings) {
         let mut ui = SettingsUi::default();

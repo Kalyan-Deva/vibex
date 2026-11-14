@@ -119,8 +119,9 @@ impl Parser {
         // "Anywhere" transitions.
         match byte {
             0x18 | 0x1a => {
+                // CAN / SUB cancel a string in progress: it isn't dispatched
                 self.flush_utf8(p);
-                self.leave_string(p, false);
+                self.cancel_string(p);
                 p.execute(byte);
                 self.state = State::Ground;
                 return;
@@ -307,6 +308,26 @@ impl Parser {
                     p.apc_dispatch(&self.apc);
                 }
                 // don't keep a multi-megabyte buffer around
+                if self.apc.capacity() > 64 * 1024 {
+                    self.apc = Vec::new();
+                } else {
+                    self.apc.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Drop a string sequence without acting on it (CAN / SUB).
+    fn cancel_string<P: Perform>(&mut self, p: &mut P) {
+        match self.state {
+            State::OscString => {
+                self.osc.clear();
+                self.osc_splits.clear();
+            }
+            // the handler has to hear the end of a DCS it was given
+            State::DcsPassthrough => p.unhook(),
+            State::ApcString => {
                 if self.apc.capacity() > 64 * 1024 {
                     self.apc = Vec::new();
                 } else {

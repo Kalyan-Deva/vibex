@@ -179,7 +179,11 @@ impl Sixel {
                     return;
                 }
                 b';' => {
-                    self.params.push(self.num);
+                    // no sixel command takes more than 5; an endless `;;;`
+                    // must not grow memory
+                    if self.params.len() < 8 {
+                        self.params.push(self.num);
+                    }
                     self.num = 0;
                     self.num_seen = false;
                     return;

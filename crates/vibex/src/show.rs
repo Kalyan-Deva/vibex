@@ -80,7 +80,7 @@ pub fn run(args: Vec<String>) -> i32 {
             "--center" | "--centre" => size.center = true,
             "--left" => size.center = false,
             "-h" | "--help" => {
-                println!("{USAGE}");
+                outln!("{USAGE}");
                 return 0;
             }
             _ => files.push(a),
@@ -107,7 +107,10 @@ pub fn run(args: Vec<String>) -> i32 {
             "md" | "markdown" => std::fs::read_to_string(p).map_err(|e| e.to_string()).map(|t| {
                 let _ = out.write_all(markdown(&t, width).as_bytes());
             }),
-            "jpg" | "jpeg" | "gif" | "bmp" | "webp" => Err("only PNG images for now (convert it, or open it with Ctrl+click)".into()),
+            "jpg" | "jpeg" | "jfif" => {
+                std::fs::read(p).map_err(|e| e.to_string()).and_then(|b| jpeg_to_png(&b)).and_then(|bytes| image(&mut out, &bytes, width, height, size))
+            }
+            "gif" | "bmp" | "webp" => Err("PNG and JPEG images only (convert it, or open it with Ctrl+click)".into()),
             _ => std::fs::read_to_string(p).map_err(|e| e.to_string()).map(|t| {
                 let _ = out.write_all(t.replace('\n', "\r\n").as_bytes());
             }),
@@ -242,12 +245,37 @@ fn image_escape_cell(png: &[u8], max_cols: usize, max_rows: usize, size: Size, c
         (est, tall) = (c as f32, c as f32 * cw * h as f32 / w as f32 / ch);
     }
     let mut n = (tall - 0.001).ceil().max(1.0) as usize;
+    // No size asked for: snap to whole rows (sized by rows, the terminal
+    // keeps the aspect, so the width moves by a fraction of a column) so
+    // there's no nearly empty row between the picture and the prompt.
+    let plain = target.is_none() && !size.actual && size.width.is_none() && size.height.is_none() && !size.fit;
+    if plain && tall >= 1.0 && (tall - tall.round()).abs() > 0.05 {
+        let r = tall.round().max(1.0);
+        let wide = est * r / tall;
+        if wide.ceil() as usize <= max_c && (r as usize) <= max_r {
+            est = wide;
+            n = r as usize;
+            cols = None;
+            rows = Some(n);
+        }
+    }
     if n > max_r {
         // too tall for the window: as many rows as fit, the aspect kept
         est = est * max_r as f32 / tall;
         n = max_r;
         cols = None;
         rows = Some(max_r);
+    }
+    // Much bigger than it will be drawn (a phone photo shown at window
+    // width): send only the pixels that show. Same size on screen, a
+    // fraction of the data through the console host. Best effort: if the
+    // PNG can't be re-encoded it goes as it is.
+    if data.is_none() && !size.actual {
+        let shown_w = (est.ceil() * cw).ceil().max(1.0) as u32;
+        if w > shown_w + shown_w / 4 {
+            let th = ((h as f64 * shown_w as f64 / w as f64).round() as u32).max(1);
+            data = resize_png(png, shown_w, th).ok();
+        }
     }
     let data = base64(data.as_deref().unwrap_or(png));
     let chunks: Vec<&str> = data.as_bytes().chunks(4096).map(|c| std::str::from_utf8(c).unwrap_or("")).collect();
@@ -350,16 +378,55 @@ fn resize_rgba(src: &[u8], sw: u32, sh: u32, tw: u32, th: u32) -> Vec<u8> {
 
 fn resize_png(bytes: &[u8], tw: u32, th: u32) -> Result<Vec<u8>, String> {
     let (px, w, h) = decode_png(bytes)?;
-    let rgba = resize_rgba(&px, w, h, tw, th);
+    encode_png(&resize_rgba(&px, w, h, tw, th), tw, th)
+}
+
+fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     {
-        let mut enc = png::Encoder::new(&mut out, tw, th);
+        let mut enc = png::Encoder::new(&mut out, w, h);
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
+        // fast: the picture goes straight to the terminal, not to disk
+        enc.set_compression(png::Compression::Fast);
         let mut wr = enc.write_header().map_err(|e| e.to_string())?;
-        wr.write_image_data(&rgba).map_err(|e| e.to_string())?;
+        wr.write_image_data(rgba).map_err(|e| e.to_string())?;
     }
     Ok(out)
+}
+
+/// The biggest picture side decoded (photos beyond this are refused
+/// rather than eating memory).
+const MAX_DECODE_SIDE: u16 = 16_384;
+
+/// A JPEG as a PNG, so it goes through the same path (kitty graphics only
+/// carries PNG or raw pixels).
+fn jpeg_to_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let mut dec = jpeg_decoder::Decoder::new(bytes);
+    dec.read_info().map_err(|e| format!("not a JPEG file ({e})"))?;
+    let info = dec.info().ok_or("not a JPEG file")?;
+    if info.width == 0 || info.height == 0 || info.width > MAX_DECODE_SIDE || info.height > MAX_DECODE_SIDE {
+        return Err(format!("picture too big ({}x{})", info.width, info.height));
+    }
+    let px = dec.decode().map_err(|e| format!("can't read the JPEG ({e})"))?;
+    let (w, h) = (info.width as u32, info.height as u32);
+    let n = w as usize * h as usize;
+    let mut rgba = Vec::with_capacity(n * 4);
+    match info.pixel_format {
+        jpeg_decoder::PixelFormat::L8 => px.iter().for_each(|&l| rgba.extend_from_slice(&[l, l, l, 255])),
+        jpeg_decoder::PixelFormat::L16 => px.chunks_exact(2).for_each(|l| rgba.extend_from_slice(&[l[0], l[0], l[0], 255])),
+        jpeg_decoder::PixelFormat::RGB24 => px.chunks_exact(3).for_each(|p| rgba.extend_from_slice(&[p[0], p[1], p[2], 255])),
+        jpeg_decoder::PixelFormat::CMYK32 => px.chunks_exact(4).for_each(|p| {
+            // Adobe JPEGs store CMYK inverted
+            let k = p[3] as u32;
+            let ch = |c: u8| (c as u32 * k / 255) as u8;
+            rgba.extend_from_slice(&[ch(p[0]), ch(p[1]), ch(p[2]), 255])
+        }),
+    }
+    if rgba.len() != n * 4 {
+        return Err("can't read the JPEG (short data)".into());
+    }
+    encode_png(&rgba, w, h)
 }
 
 // ------------------------------------------------------------ markdown
@@ -769,8 +836,57 @@ mod tests {
         // taller than the window: shrunk to its rows (40 - 2)
         let esc = image_escape_cell(&png, 100, 40, Size { width: Some(120), ..Default::default() }, (8.0, 16.0)).unwrap();
         assert!(esc.contains(",r=38,") && !esc.contains(",c=") && esc.ends_with("\x1b[38B\r"), "{esc}");
+        // no size asked: a 256x256 picture on 11x26 cells is 10.15 rows at
+        // 24 columns; it's snapped to 10 whole rows (no near-empty 11th)
+        let mut sq = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        sq.extend_from_slice(&256u32.to_be_bytes());
+        sq.extend_from_slice(&256u32.to_be_bytes());
+        let esc = image_escape_cell(&sq, 120, 40, Size::default(), (11.0, 26.0)).unwrap();
+        assert!(esc.contains(",r=10,") && !esc.contains(",c=") && esc.ends_with("\x1b[10B\r"), "{esc}");
+        // an asked-for width is kept as it is
+        let esc = image_escape_cell(&sq, 120, 40, Size { width: Some(24), ..Default::default() }, (11.0, 26.0)).unwrap();
+        assert!(esc.contains(",c=24,") && esc.ends_with("\x1b[11B\r"), "{esc}");
         assert_eq!(parse_cell("9x19"), Some((9.0, 19.0)));
         assert_eq!(parse_cell("x"), None);
+    }
+
+    #[test]
+    fn jpeg_pictures_show_too() {
+        let png = jpeg_to_png(include_bytes!("testdata/tiny.jpg")).unwrap();
+        assert_eq!(png_size(&png), Some((16, 8)));
+        let (px, _, _) = decode_png(&png).unwrap();
+        // left column dark red-ish, right column bright: a gradient survived
+        assert!(px[0] < 40 && px[15 * 4] > 200, "{} {}", px[0], px[15 * 4]);
+        assert!(jpeg_to_png(b"not a jpeg").is_err());
+    }
+
+    #[test]
+    fn big_pictures_are_sent_at_their_shown_size() {
+        let px = vec![200u8; 400 * 100 * 4];
+        let big = encode_png(&px, 400, 100).unwrap();
+        // 10 columns of 8 px: 80 px wide is all that shows
+        let esc = image_escape_cell(&big, 100, 40, Size { width: Some(10), ..Default::default() }, (8.0, 16.0)).unwrap();
+        let b64: String = esc.split(';').nth(1).unwrap().chars().take_while(|c| *c != '\x1b').collect();
+        let sent = base64_decode_for_test(&b64);
+        assert_eq!(png_size(&sent), Some((80, 20)));
+        // --actual keeps every pixel
+        let esc = image_escape_cell(&big, 100, 40, Size { actual: true, ..Default::default() }, (8.0, 16.0)).unwrap();
+        assert!(esc.len() > base64(&big).len());
+    }
+
+    fn base64_decode_for_test(s: &str) -> Vec<u8> {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = Vec::new();
+        let (mut acc, mut bits) = (0u32, 0);
+        for c in s.bytes().filter(|c| *c != b'=') {
+            acc = acc << 6 | T.iter().position(|t| *t == c).unwrap() as u32;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+            }
+        }
+        out
     }
 
     #[test]

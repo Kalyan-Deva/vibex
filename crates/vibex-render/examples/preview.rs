@@ -45,7 +45,7 @@ fn main() {
     let (on, _, _) = render(&paths, true, cols, rows);
     // stack: ligatures off on top, on below, with a divider
     let mut px = off;
-    px.extend(std::iter::repeat(0xf38020).take(w * 3));
+    px.extend(std::iter::repeat_n(0xf38020, w * 3));
     px.extend(on);
     vibex_render::write_bmp(std::path::Path::new(out), &px, w, h * 2 + 3).expect("write bmp");
     println!("wrote {out} ({w}x{})", h * 2 + 3);

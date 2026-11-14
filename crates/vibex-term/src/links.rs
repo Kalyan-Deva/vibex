@@ -1,13 +1,20 @@
 //! OSC 8 hyperlink targets, shared by all terminals (cells store a u16 id).
 
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 #[derive(Default)]
 struct Table {
-    urls: Vec<Box<str>>,
-    ids: HashMap<Box<str>, u16>,
+    /// Each URL once, shared by both lookups.
+    urls: Vec<Arc<str>>,
+    ids: HashMap<Arc<str>, u16>,
+    bytes: usize,
 }
+
+/// The most URL text kept for the whole process. Past it (a program
+/// printing link after unique link) new links aren't clickable; ids are
+/// never reused, since a reused id would make an old link open a new URL.
+const MAX_BYTES: usize = 16 << 20;
 
 fn table() -> &'static RwLock<Table> {
     static T: OnceLock<RwLock<Table>> = OnceLock::new();
@@ -19,19 +26,21 @@ pub fn intern(url: &str) -> u16 {
     if url.is_empty() || url.len() > 2048 {
         return 0;
     }
-    if let Some(&id) = table().read().unwrap().ids.get(url) {
+    if let Some(&id) = table().read().unwrap_or_else(|e| e.into_inner()).ids.get(url) {
         return id;
     }
-    let mut t = table().write().unwrap();
+    let mut t = table().write().unwrap_or_else(|e| e.into_inner());
     if let Some(&id) = t.ids.get(url) {
         return id;
     }
-    if t.urls.len() >= u16::MAX as usize {
+    if t.urls.len() >= u16::MAX as usize || t.bytes + url.len() > MAX_BYTES {
         return 0;
     }
-    t.urls.push(url.into());
+    let shared: Arc<str> = url.into();
+    t.urls.push(shared.clone());
+    t.bytes += url.len();
     let id = t.urls.len() as u16;
-    t.ids.insert(url.into(), id);
+    t.ids.insert(shared, id);
     id
 }
 
@@ -39,7 +48,7 @@ pub fn url(id: u16) -> Option<String> {
     if id == 0 {
         return None;
     }
-    table().read().unwrap().urls.get(id as usize - 1).map(|s| s.to_string())
+    table().read().unwrap_or_else(|e| e.into_inner()).urls.get(id as usize - 1).map(|s| s.to_string())
 }
 
 /// Links Vibex will open on Ctrl+click. Anything else (file:, custom

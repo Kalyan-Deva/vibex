@@ -78,9 +78,10 @@ impl Scene {
         Self { width, height, background, items: Vec::with_capacity(4096), images: Vec::new() }
     }
     pub(crate) fn image(&mut self, img: &Arc<ImageData>, x: i32, y: i32, w: u32, h: u32, src: [f32; 4]) {
-        if w == 0 || h == 0 || src[2] <= 0.0 || src[3] <= 0.0 {
+        if w == 0 || h == 0 || src[2] <= 0.0 || src[3] <= 0.0 || !image_ok(img) {
             return;
         }
+        let (w, h) = (w.min(MAX_EXTENT), h.min(MAX_EXTENT));
         let index = match self.images.iter().position(|i| i.uid == img.uid) {
             Some(i) => i,
             None => {
@@ -95,7 +96,8 @@ impl Scene {
     }
     pub(crate) fn rect_a(&mut self, x: i32, y: i32, w: usize, h: usize, color: u32, alpha: u8) {
         if w > 0 && h > 0 {
-            self.items.push(Item::Rect(Rect { x, y, w: w as u32, h: h as u32, color, alpha }));
+            let (w, h) = (w.min(MAX_EXTENT as usize) as u32, h.min(MAX_EXTENT as usize) as u32);
+            self.items.push(Item::Rect(Rect { x, y, w, h, color, alpha }));
         }
     }
     pub(crate) fn frect(&mut self, r: PxRect, color: u32, alpha: u8) {
@@ -107,19 +109,27 @@ impl Scene {
         }
     }
     pub(crate) fn blur(&mut self, r: PxRect, radius: f32) {
-        let c = Clip { x: r.x.round() as i32, y: r.y.round() as i32, w: r.w.round().max(0.0) as u32, h: r.h.round().max(0.0) as u32 };
+        let c = to_clip(r);
         if c.w > 0 && c.h > 0 && radius > 0.0 {
             self.items.push(Item::Blur(c, radius));
         }
     }
     pub(crate) fn clip(&mut self, r: Option<PxRect>) {
-        self.items.push(Item::Clip(r.map(|r| Clip {
-            x: r.x.round() as i32,
-            y: r.y.round() as i32,
-            w: r.w.round().max(0.0) as u32,
-            h: r.h.round().max(0.0) as u32,
-        })));
+        self.items.push(Item::Clip(r.map(to_clip)));
     }
+}
+
+/// Widest / tallest item, so `x + w` stays well inside i32 in the backends.
+const MAX_EXTENT: u32 = 1 << 24;
+
+fn to_clip(r: PxRect) -> Clip {
+    let ext = |v: f32| v.round().clamp(0.0, MAX_EXTENT as f32) as u32;
+    Clip { x: r.x.round() as i32, y: r.y.round() as i32, w: ext(r.w), h: ext(r.h) }
+}
+
+/// An image the backends can sample: non-empty, with all its pixels.
+pub(crate) fn image_ok(img: &ImageData) -> bool {
+    img.width > 0 && img.height > 0 && img.rgba.len() >= img.width as usize * img.height as usize * 4
 }
 
 /// The glass look's frosted sheen: a soft white glow fading down from the
@@ -173,11 +183,26 @@ fn in_range(r: &Option<VisibleSelection>, x: usize, vy: isize) -> bool {
     vy >= 0 && r.is_some_and(|s| s.contains(x, vy as usize))
 }
 
-fn colors(theme: &Theme, cell: &Cell, x: usize, vy: isize, state: &DrawState) -> (u32, u32) {
-    let selected = in_range(&state.selection, x, vy);
-    let (mut fg, mut bg) = base_colors(theme, cell, selected);
+/// The columns cell `x` belongs to: a wide char and its spacer are one.
+fn pair(cells: &[Cell], x: usize) -> (usize, usize) {
+    if cells[x].has(flags::WIDE) && x + 1 < cells.len() {
+        (x, x + 1)
+    } else if cells[x].has(flags::WIDE_SPACER) && x > 0 && cells[x - 1].has(flags::WIDE) {
+        (x - 1, x)
+    } else {
+        (x, x)
+    }
+}
+
+/// Colours of cell `x`; both halves of a wide char get the same, so a
+/// selection or search hit covers the whole glyph, not half of it.
+fn colors(theme: &Theme, cells: &[Cell], x: usize, vy: isize, state: &DrawState) -> (u32, u32) {
+    let (a, b) = pair(cells, x);
+    let either = |r: &VisibleSelection| r.contains(a, vy as usize) || r.contains(b, vy as usize);
+    let selected = vy >= 0 && state.selection.as_ref().is_some_and(either);
+    let (mut fg, mut bg) = base_colors(theme, &cells[a], selected);
     if !selected && vy >= 0 {
-        if let Some(h) = state.highlights.iter().rev().find(|h| h.range.contains(x, vy as usize)) {
+        if let Some(h) = state.highlights.iter().rev().find(|h| either(&h.range)) {
             bg = h.bg;
             if let Some(f) = h.fg {
                 fg = f;
@@ -189,6 +214,15 @@ fn colors(theme: &Theme, cell: &Cell, x: usize, vy: isize, state: &DrawState) ->
 
 fn is_box_char(c: char) -> bool {
     matches!(c as u32, 0x2500..=0x259F)
+}
+
+/// Colour glyphs are drawn into a two-cell box; one in a single-width cell
+/// gets half of it, so it doesn't spill over the next cell.
+fn narrow_color(mut key: GlyphKey) -> GlyphKey {
+    if key.color && key.split == 0 {
+        key.split = 2;
+    }
+    key
 }
 
 /// Where and how a pane is drawn.
@@ -223,7 +257,10 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
     let cols = term.cols();
     let top_line = term.top_visible_line() as isize;
     let total = term.total_lines() as isize;
-    let shift = state.y_shift.round() as i32;
+    // smooth scrolling moves by a row or two; a wild value would only make
+    // us walk (and overflow on) rows that can't be seen
+    let max_shift = (rows as i32 + 1).saturating_mul(ch as i32);
+    let shift = (state.y_shift.round() as i32).clamp(-max_shift, max_shift);
     let extra_above = ((shift.max(0) as usize).div_ceil(ch)) as isize;
     let extra_below = (((-shift).max(0) as usize).div_ceil(ch)) as isize;
     let row_range = -extra_above..rows + extra_below;
@@ -232,7 +269,16 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
     let offset = term.display_offset();
     let cursor_vy = (term.cursor.y + offset) as isize;
     let show_cursor = term.modes.show_cursor && cursor_vy < rows && state.cursor_visible;
-    let cursor_x = term.cursor.x;
+    // the cursor box: on the second half of a wide char it covers the
+    // whole char, and on a wide char it's two cells wide
+    let (cursor_x, cursor_w) = if show_cursor {
+        let cells = &term.visible_row(cursor_vy as usize).cells;
+        let x = term.cursor.x;
+        let x = if x < cells.len() { pair(cells, x).0 } else { x };
+        (x, if cells.get(x).is_some_and(|c| c.has(flags::WIDE)) { cw * 2 } else { cw })
+    } else {
+        (term.cursor.x, cw)
+    };
     let block_cursor = show_cursor && state.focused && term.cursor_shape == CursorShape::Block;
 
     let row_at = |vy: isize| {
@@ -247,9 +293,9 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
         let mut x = 0;
         let n = cols.min(row.cells.len());
         while x < n {
-            let (_, bg) = colors(theme, &row.cells[x], x, vy, state);
+            let (_, bg) = colors(theme, &row.cells, x, vy, state);
             let start = x;
-            while x < n && colors(theme, &row.cells[x], x, vy, state).1 == bg {
+            while x < n && colors(theme, &row.cells, x, vy, state).1 == bg {
                 x += 1;
             }
             if bg != theme.background {
@@ -272,9 +318,7 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
     draw_images(scene, row_range.clone(), &row_at, &row_top, px, cw, ch, true);
 
     if block_cursor {
-        let wide = term.visible_row(cursor_vy as usize).cells.get(cursor_x).is_some_and(|c| c.has(flags::WIDE));
-        let w = if wide { cw * 2 } else { cw };
-        scene.rect(px + (cursor_x * cw) as i32, row_top(cursor_vy), w, ch, theme.cursor);
+        scene.rect(px + (cursor_x * cw) as i32, row_top(cursor_vy), cursor_w, ch, theme.cursor);
     }
 
     // pass 2: glyphs and decorations
@@ -291,7 +335,7 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
             if block_cursor && vy == cursor_vy && x == cursor_x {
                 theme.cursor_text
             } else {
-                colors(theme, &row.cells[x], x, vy, state).0
+                colors(theme, &row.cells, x, vy, state).0
             }
         };
         let left = |x: usize| px + (x * cw) as i32;
@@ -311,11 +355,16 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
                 continue;
             }
             let style = style_of(cell);
+            let narrow = !cell.has(flags::WIDE);
 
             // a grapheme cluster: shape it as one unit
             if vibex_term::grapheme::is_cluster(cell.c) {
                 let text = vibex_term::grapheme::text(cell.c);
-                for g in fonts.shape_cluster(&text, style) {
+                for mut g in fonts.shape_cluster(&text, style) {
+                    if narrow && g.key.color {
+                        g.key.split = g.key.split.max(1) * 2;
+                        g.x /= 2;
+                    }
                     scene.glyph(left(x) + g.x, top + baseline - g.y, g.key, fg);
                 }
                 x += 1;
@@ -358,7 +407,10 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
                 continue;
             }
 
-            let key = fonts.resolve(cell.c, style);
+            let mut key = fonts.resolve(cell.c, style);
+            if narrow {
+                key = narrow_color(key);
+            }
             scene.glyph(left(x), top + baseline, key, fg);
             x += 1;
         }
@@ -402,14 +454,15 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
         let top = row_top(cursor_vy);
         let color = theme.cursor;
         let t = thick.max(2);
+        let w = cursor_w;
         match (state.focused, term.cursor_shape) {
             (true, CursorShape::Bar) => scene.rect(left, top, t, ch, color),
-            (true, CursorShape::Underline) => scene.rect(left, top + ch as i32 - t as i32, cw, t, color),
+            (true, CursorShape::Underline) => scene.rect(left, top + ch as i32 - t as i32, w, t, color),
             _ => {
-                scene.rect(left, top, cw, 1, color);
-                scene.rect(left, top + ch as i32 - 1, cw, 1, color);
+                scene.rect(left, top, w, 1, color);
+                scene.rect(left, top + ch as i32 - 1, w, 1, color);
                 scene.rect(left, top, 1, ch, color);
-                scene.rect(left + cw as i32 - 1, top, 1, ch, color);
+                scene.rect(left + w as i32 - 1, top, 1, ch, color);
             }
         }
     }
@@ -424,6 +477,8 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
         scene.rect(px - (layout.pad_x as i32).min(6) + 1, top + 3, 3, h.saturating_sub(6), st.color);
         let cells = ((layout.rect.w as usize).saturating_sub(layout.pad_x * 2) / cw).max(4);
         let detail_w = crate::text_width(&st.detail);
+        // a pane too narrow for the detail shows only the command
+        let detail_w = if detail_w + 2 <= cells { detail_w } else { 0 };
         let cmd = truncate(&format!("❯ {}", st.command), cells.saturating_sub(detail_w + 2));
         let base = top + layout.pad_y as i32 / 2 + baseline;
         text_run(scene, fonts, px, base, cw, &cmd, theme.foreground, Style::Bold);
@@ -451,8 +506,8 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
     if let Some(text) = state.ghost.as_deref().filter(|t| !t.is_empty()) {
         if state.preedit.is_none() {
             let top = row_top(cursor_vy);
-            let left = px + (cursor_x * cw) as i32;
-            let room = term.cols().saturating_sub(cursor_x);
+            let left = px + (term.cursor.x * cw) as i32;
+            let room = term.cols().saturating_sub(term.cursor.x);
             let mut shown = String::new();
             let mut width = 0;
             for ch in text.chars() {
@@ -470,7 +525,7 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
     // IME composition: inline at the cursor, underlined, over the text below
     if let Some(text) = state.preedit.as_deref().filter(|t| !t.is_empty()) {
         let top = row_top(cursor_vy);
-        let left = px + (cursor_x * cw) as i32;
+        let left = px + (term.cursor.x * cw) as i32;
         let w = crate::text_width(text).max(1) * cw;
         scene.rect(left, top, w, ch, blend(theme.background, theme.foreground, 28));
         text_run(scene, fonts, left, top + baseline, cw, text, theme.foreground, Style::Regular);
@@ -510,9 +565,10 @@ fn draw_images<'a>(
             let y0 = top as f32 + s.dest[1] * chf;
             let x1 = x0 + s.dest[2] * cwf;
             let y1 = y0 + s.dest[3] * chf;
+            // in f32: a bogus slice can't overflow the i32 maths
             let (xi, yi) = (x0.round() as i32, y0.round() as i32);
-            let w = (x1.round() as i32 - xi).max(0) as u32;
-            let h = (y1.round() as i32 - yi).max(0) as u32;
+            let w = (x1.round() - x0.round()).max(0.0) as u32;
+            let h = (y1.round() - y0.round()).max(0.0) as u32;
             scene.image(&s.image, xi, yi, w, h, s.src);
         }
     }
@@ -532,7 +588,7 @@ pub(crate) fn text_run(scene: &mut Scene, fonts: &mut FontSet, x: i32, baseline_
         }
         if c != ' ' {
             let key = fonts.resolve(c, style);
-            scene.glyph(x, baseline_y, key, fg);
+            scene.glyph(x, baseline_y, if w == 1 { narrow_color(key) } else { key }, fg);
         }
         x += (w * cw) as i32;
     }
@@ -604,15 +660,55 @@ pub fn status_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usi
         text_run(scene, fonts, x, baseline, cw, &seg.text, fg, Style::new(seg.bold, false))
     };
 
+    let right_w: usize = s.right.iter().map(|seg| crate::text_width(&seg.text) * cw).sum();
+    // the left side stops two cells short of the right side; a segment that
+    // doesn't fit is shortened from the front ("…\long\path\end"), so the
+    // end of a path stays readable and nothing is drawn over
+    let limit = scene.width as i32 - pad_x - right_w as i32 - 2 * cw as i32;
     let mut x = pad_x;
     for seg in &s.left {
-        x = draw(scene, fonts, x, seg);
+        let room = ((limit - x).max(0) as usize) / cw.max(1);
+        if room == 0 {
+            break;
+        }
+        if crate::text_width(&seg.text) <= room {
+            x = draw(scene, fonts, x, seg);
+        } else {
+            let short = StatusSegment { text: keep_end(&seg.text, room), ..seg.clone() };
+            draw(scene, fonts, x, &short);
+            break;
+        }
     }
-    let right_w: usize = s.right.iter().map(|seg| crate::text_width(&seg.text) * cw).sum();
     let mut rx = scene.width as i32 - pad_x - right_w as i32;
     for seg in &s.right {
         rx = draw(scene, fonts, rx, seg);
     }
+}
+
+/// `text` cut to `cols` columns by dropping from the front: a leading space
+/// is kept, then "…", then as much of the end as fits.
+pub(crate) fn keep_end(text: &str, cols: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if crate::text_width(text) <= cols {
+        return text.to_string();
+    }
+    let lead = if text.starts_with(' ') { " " } else { "" };
+    let budget = cols.saturating_sub(lead.len() + 1);
+    let mut tail: Vec<char> = Vec::new();
+    let mut used = 0;
+    for c in text.chars().rev() {
+        let w = c.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        tail.push(c);
+    }
+    tail.reverse();
+    if cols <= lead.len() {
+        return lead[..cols].to_string();
+    }
+    format!("{lead}…{}", tail.into_iter().collect::<String>())
 }
 
 pub fn dividers(scene: &mut Scene, theme: &Theme, rects: &[PxRect]) {
@@ -638,6 +734,11 @@ pub(crate) fn hspan(scene: &mut Scene, x0: f32, x1: f32, y: i32, color: u32, alp
         return;
     }
     let (a, b) = (x0.ceil(), x1.floor());
+    if b < a {
+        // both ends in one pixel: it's covered by the span's width
+        scene.rect_a(x0.floor() as i32, y, 1, 1, color, (alpha as f32 * (x1 - x0)) as u8);
+        return;
+    }
     if b > a {
         scene.rect_a(a as i32, y, (b - a) as usize, 1, color, alpha);
     }

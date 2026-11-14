@@ -15,6 +15,12 @@ pub const MAX_SIDE: u32 = 8192;
 /// Largest image area we accept (128 MiB of RGBA).
 pub const MAX_PIXELS: u64 = 32 * 1024 * 1024;
 
+/// Image bytes placed on rows (screen + history) before the oldest
+/// placements are taken down.
+pub const PLACED_LIMIT: usize = 512 * 1024 * 1024;
+/// Most placements kept on rows.
+pub const MAX_PLACEMENTS: usize = 8192;
+
 static NEXT_UID: AtomicU64 = AtomicU64::new(1);
 
 /// Decoded pixels: RGBA8, straight (not premultiplied) alpha.
@@ -197,7 +203,21 @@ impl Terminal {
             }
         }
         self.last_cell = None;
+        self.track_placement(pid, p.image.bytes());
         pid
+    }
+
+    /// Count a placement against the budget for images on rows; past it,
+    /// the oldest placements are taken down (a program placing image after
+    /// image would otherwise keep every one alive in the scrollback).
+    fn track_placement(&mut self, pid: u64, bytes: usize) {
+        self.placed.push_back((pid, bytes + 512));
+        self.placed_bytes += bytes + 512;
+        while self.placed_bytes > PLACED_LIMIT || self.placed.len() > MAX_PLACEMENTS {
+            let Some((old, b)) = self.placed.pop_front() else { break };
+            self.placed_bytes -= b;
+            self.remove_placements(&[old]);
+        }
     }
 
     /// Every row that can hold images: history + both screens.

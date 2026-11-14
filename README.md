@@ -77,7 +77,7 @@ nano notes.txt                   # nano and Neovim come bundled
   - *Dragon (Kali Linux)*: Kali's colours (Dragon Dark), its two-line `┌──(user㉿host)-[~]` prompt, its coloured `ls`, and a classic title bar with a menu bar, all taken from Kali's own configuration. See [The Kali Linux look](docs/CONFIG.md#the-kali-linux-look).
   - Switching back to *Vibex* takes every Dragon setting off again, and each piece (theme, prompt, title bar) can also be set on its own in `vibex.lua`.
 - **54 built-in themes**, light and dark: Catppuccin, Dracula, Nord, One Dark, Monokai, Gruvbox, Solarized, Tokyo Night, Rosé Pine, Kanagawa and more, or your own colours. Smooth scrolling throughout.
-- **Inline images:** sixel and the kitty graphics protocol. `vshow` draws PNGs and rendered Markdown right in the terminal, with `--width`, `--height`, `--fit`, `--scale 50%`, `--center` and more. An image taller than the window is shrunk to fit, and the prompt always comes back below it.
+- **Inline images:** sixel and the kitty graphics protocol. `vshow` draws PNG and JPEG pictures and rendered Markdown right in the terminal, with `--width`, `--height`, `--fit`, `--scale 50%`, `--center` and more. An image taller than the window is shrunk to fit, and the prompt always comes back below it.
 - **Modern protocols:** OSC 8 hyperlinks, OSC 52 clipboard, OSC 9/777 notifications, the kitty keyboard protocol, IME input, and Ctrl+click on URLs and `path:line`.
 - **Accessibility:** screen readers through UI Automation.
 

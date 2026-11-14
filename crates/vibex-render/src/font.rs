@@ -92,9 +92,25 @@ impl Face {
     }
 }
 
-fn load_face(path: &str) -> Option<Face> {
-    // Faces live for the whole program; leaking keeps `Face<'static>` simple.
+/// A font file's bytes, read once per process. Faces live for the whole
+/// program, so leaking keeps `Face<'static>` simple, but only once per file:
+/// every window, font change, screenshot and export loads a FontSet, and
+/// the fallbacks alone (emoji, CJK) are ~60 MB.
+fn font_data(path: &str) -> Option<&'static [u8]> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, &'static [u8]>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(d) = map.get(path) {
+        return Some(d);
+    }
     let data: &'static [u8] = Box::leak(std::fs::read(path).ok()?.into_boxed_slice());
+    map.insert(path.to_string(), data);
+    Some(data)
+}
+
+fn load_face(path: &str) -> Option<Face> {
+    let data = font_data(path)?;
     let face = rustybuzz::Face::from_slice(data, 0)?;
     let has_color = face.tables().colr.is_some();
     Some(Face { face, has_color })
@@ -123,7 +139,20 @@ const ITALIC: u16 = 2;
 const BOLD_ITALIC: u16 = 3;
 const FIRST_FALLBACK: u16 = 4;
 
+// Cache caps. Keys come from whatever text the terminal shows, so a long
+// session (or `cat` of random bytes) would otherwise grow them forever.
+// Past a cap the cache is dropped and refills with what's on screen.
+const MAX_GLYPHS: usize = 8192;
+const MAX_LOOKUPS: usize = 65536;
+const MAX_SHAPED: usize = 8192;
+/// Shaped runs are keyed by whole row segments: cap their bytes too.
+const MAX_SHAPED_BYTES: usize = 4 << 20;
+const MAX_CLUSTERS: usize = 4096;
+
 pub struct FontSet {
+    /// Unique per load, so a renderer's glyph atlas can tell two font sets
+    /// at the same size apart (face slots and glyph ids differ).
+    id: u32,
     /// Slots 0-3: regular, bold, italic, bold-italic (None if absent);
     /// 4..: fallbacks.
     faces: Vec<Option<Face>>,
@@ -131,6 +160,7 @@ pub struct FontSet {
     glyphs: HashMap<GlyphKey, Glyph>,
     lookups: HashMap<(char, Style), GlyphKey>,
     shaped: HashMap<(String, Style), Vec<Shaped>>,
+    shaped_bytes: usize,
     clusters: HashMap<(String, Style), Vec<ClusterGlyph>>,
     pub ligatures: bool,
     pub cell_width: usize,
@@ -183,12 +213,15 @@ impl FontSet {
                 ui = Some((at, at + 1));
             }
         }
+        static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
         let mut set = Self {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             faces,
             size_px,
             glyphs: HashMap::new(),
             lookups: HashMap::new(),
             shaped: HashMap::new(),
+            shaped_bytes: 0,
             clusters: HashMap::new(),
             ligatures: true,
             cell_width: 1,
@@ -214,6 +247,7 @@ impl FontSet {
         self.size_px = size_px.clamp(6.0, 200.0);
         self.glyphs.clear();
         self.shaped.clear();
+        self.shaped_bytes = 0;
         self.clusters.clear();
         let f = self.regular();
         let s = f.scale(self.size_px);
@@ -232,9 +266,16 @@ impl FontSet {
         self.underline_y = (self.baseline + below.max(1)).min(self.cell_height as i32 - self.line_thickness as i32);
     }
 
-    /// Changes whenever cached glyph rasters are dropped (GPU atlas resets).
-    pub fn generation(&self) -> (u32, usize) {
-        (self.size_px.to_bits(), self.cell_width)
+    /// Changes whenever cached glyph rasters are dropped or the fonts are
+    /// replaced (GPU atlas resets).
+    pub fn generation(&self) -> (u32, u32, usize) {
+        (self.id, self.size_px.to_bits(), self.cell_width)
+    }
+
+    /// Entries in the glyph, lookup, shaped-run and cluster caches.
+    #[cfg(test)]
+    pub(crate) fn cache_sizes(&self) -> (usize, usize, usize, usize) {
+        (self.glyphs.len(), self.lookups.len(), self.shaped.len(), self.clusters.len())
     }
 
     fn styled_slot(&self, style: Style) -> Option<u16> {
@@ -270,6 +311,9 @@ impl FontSet {
             return *k;
         }
         let key = self.resolve_uncached(c, style);
+        if self.lookups.len() >= MAX_LOOKUPS {
+            self.lookups.clear();
+        }
         self.lookups.insert((c, style), key);
         key
     }
@@ -317,8 +361,9 @@ impl FontSet {
         let (slot, fake) = self.run_face(style);
         let key = (text.to_string(), style);
         if !self.shaped.contains_key(&key) {
-            if self.shaped.len() > 8192 {
+            if self.shaped.len() >= MAX_SHAPED || self.shaped_bytes >= MAX_SHAPED_BYTES {
                 self.shaped.clear();
+                self.shaped_bytes = 0;
             }
             let f = self.faces[slot as usize].as_ref().unwrap();
             let mut buf = rustybuzz::UnicodeBuffer::new();
@@ -330,7 +375,8 @@ impl FontSet {
                 .iter()
                 .zip(out.glyph_positions())
                 .map(|(info, pos)| Shaped { cluster: info.cluster, id: info.glyph_id as u16, x_offset: (pos.x_offset as f32 * scale).round() as i32 })
-                .collect();
+                .collect::<Vec<_>>();
+            self.shaped_bytes += text.len() + shaped.len() * std::mem::size_of::<Shaped>();
             self.shaped.insert(key.clone(), shaped);
         }
         (slot, fake, &self.shaped[&key])
@@ -401,7 +447,7 @@ impl FontSet {
                 })
                 .collect();
         }
-        if self.clusters.len() > 4096 {
+        if self.clusters.len() >= MAX_CLUSTERS {
             self.clusters.clear();
         }
         self.clusters.insert(key, glyphs.clone());
@@ -411,6 +457,11 @@ impl FontSet {
     pub fn glyph(&mut self, key: GlyphKey) -> &Glyph {
         if !self.glyphs.contains_key(&key) {
             let g = self.rasterize(key);
+            // the GPU atlas keeps its own copy, so dropping these only costs
+            // a re-raster on the CPU path
+            if self.glyphs.len() >= MAX_GLYPHS {
+                self.glyphs.clear();
+            }
             self.glyphs.insert(key, g);
         }
         &self.glyphs[&key]
@@ -437,8 +488,10 @@ impl FontSet {
         for c in text.chars() {
             let id = f.gid(c);
             if id == 0 && !c.is_whitespace() {
+                // from the terminal fonts: a wide char (emoji) takes two cells
+                let cells = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1).clamp(1, 2);
                 missing.push((c, x));
-                x += self.cell_width as f32;
+                x += (self.cell_width * cells) as f32;
                 continue;
             }
             out.push(UiGlyph { key: GlyphKey { face: slot, id, fake_bold: false, color: false, split: 0 }, x: x.round() as i32 });
@@ -446,7 +499,10 @@ impl FontSet {
         }
         // characters Segoe lacks come from the terminal fonts
         for (c, at) in missing {
-            let key = self.resolve(c, Style::Regular);
+            let mut key = self.resolve(c, Style::Regular);
+            if key.color && key.split == 0 && unicode_width::UnicodeWidthChar::width(c).unwrap_or(1) < 2 {
+                key.split = 2;
+            }
             out.push(UiGlyph { key, x: at.round() as i32 });
         }
         Some((out, x.round() as i32))

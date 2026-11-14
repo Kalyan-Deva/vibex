@@ -57,6 +57,113 @@ pub struct Drained {
     pub clipboard_reads: usize,
     /// OSC 9 / 777: (title, body).
     pub notifications: Vec<(String, String)>,
+    /// Stopped at the budget: output may still be waiting.
+    pub more: bool,
+}
+
+/// How much output one drain takes before giving the window a turn.
+const DRAIN_BYTES: usize = 4 << 20;
+const DRAIN_TIME: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Hands out queued PTY events until a byte count or a time limit is
+/// reached. Whatever is left (an exit too) stays queued for the next drain.
+struct Budget {
+    bytes: usize,
+    until: Instant,
+    spent: bool,
+}
+
+impl Budget {
+    fn new(bytes: usize, time: std::time::Duration) -> Budget {
+        Budget { bytes, until: Instant::now() + time, spent: false }
+    }
+
+    fn next(&mut self, rx: &Receiver<PtyEvent>) -> Option<PtyEvent> {
+        if self.bytes == 0 || Instant::now() >= self.until {
+            self.spent = true;
+            return None;
+        }
+        let ev = rx.try_recv().ok()?;
+        if let PtyEvent::Output(b) = &ev {
+            self.bytes = self.bytes.saturating_sub(b.len().max(1));
+        }
+        Some(ev)
+    }
+
+    /// Stopped early (rather than running out of events).
+    fn spent(&self) -> bool {
+        self.spent
+    }
+}
+
+/// The input line rebuilt from the bytes sent to the shell: printable
+/// text, Backspace, Ctrl+U / Ctrl+C (clear) and Enter (done). Escape
+/// sequences are skipped; cursor keys among them mark it `edited`.
+#[derive(Default)]
+pub(crate) struct TypedLine {
+    pub(crate) text: String,
+    pub(crate) edited: bool,
+    /// Inside an escape sequence: 1 after ESC, 2 in CSI / SS3, 3 in a string
+    esc: u8,
+    /// The CSI's parameters so far (to tell paste brackets from editing keys)
+    params: String,
+}
+
+impl TypedLine {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        const MAX: usize = 4096;
+        for ch in String::from_utf8_lossy(bytes).chars() {
+            match self.esc {
+                1 => {
+                    self.params.clear();
+                    self.esc = match ch {
+                        '[' | 'O' => 2,
+                        ']' | 'P' | '_' => 3,
+                        // a lone Esc (PowerShell: clear the line), or Alt+key
+                        _ => {
+                            self.text.clear();
+                            0
+                        }
+                    };
+                    continue;
+                }
+                2 => {
+                    if ('@'..='~').contains(&ch) {
+                        // the final byte: cursor movement and editing keys
+                        // (not the brackets around a paste: 200~ / 201~)
+                        let paste = ch == '~' && matches!(self.params.as_str(), "200" | "201");
+                        if matches!(ch, 'A' | 'B' | 'C' | 'D' | 'H' | 'F' | '~') && !paste {
+                            self.edited = true;
+                        }
+                        self.esc = 0;
+                    } else if self.params.len() < 16 {
+                        self.params.push(ch);
+                    }
+                    continue;
+                }
+                3 => {
+                    if ch == '\u{7}' || ch == '\\' {
+                        self.esc = 0;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            match ch {
+                '\u{1b}' => self.esc = 1,
+                // Enter (the command is gone), Ctrl+C, Ctrl+U
+                '\r' | '\n' | '\u{3}' | '\u{15}' => {
+                    self.text.clear();
+                    self.edited = false;
+                }
+                '\u{8}' | '\u{7f}' => {
+                    self.text.pop();
+                }
+                c if !c.is_control() && self.text.len() < MAX => self.text.push(c),
+                _ => {}
+            }
+        }
+    }
 }
 
 pub struct Pane {
@@ -86,6 +193,10 @@ pub struct Pane {
     pub hold: bool,
     /// The program exited and the pane is waiting to be closed.
     pub held: bool,
+    /// What Vibex itself has sent since the last Enter: the line being
+    /// typed, as a second opinion for the risky-command check when the
+    /// screen can't be read (output painted over the prompt).
+    typed: TypedLine,
     /// Trigger scanning: next line to look at (stable numbering, see
     /// `Terminal::line_base`), highlights made, last time each fired.
     pub trigger_next: u64,
@@ -149,6 +260,7 @@ impl Pane {
             activity: false,
             hold: false,
             held: false,
+            typed: TypedLine::default(),
             trigger_next: 0,
             trigger_epoch: 0,
             trigger_marks: Default::default(),
@@ -178,18 +290,28 @@ impl Pane {
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
+        self.typed.feed(bytes);
         let _ = self.pty.write(bytes);
+    }
+
+    /// The line typed since the last Enter, as Vibex sent it (None after
+    /// cursor keys: then it may not match the shell's line).
+    pub fn typed_line(&self) -> Option<&str> {
+        (!self.typed.edited).then_some(self.typed.text.as_str())
     }
 
     pub fn kill(&self) {
         self.pty.kill();
     }
 
-    /// Feed pending output into the terminal and answer its queries.
+    /// Feed pending output into the terminal and answer its queries. At
+    /// most a budget's worth per call (`more` says some was left), so a
+    /// flood can't stop the window from taking input or redrawing.
     pub fn drain(&mut self) -> Drained {
         let mut d = Drained::default();
         let before = self.term.generation();
-        while let Ok(ev) = self.rx.try_recv() {
+        let mut budget = Budget::new(DRAIN_BYTES, DRAIN_TIME);
+        while let Some(ev) = budget.next(&self.rx) {
             match ev {
                 PtyEvent::Output(bytes) => {
                     if self.player.is_some() {
@@ -215,6 +337,7 @@ impl Pane {
                 }
             }
         }
+        d.more = budget.spent();
         let replies = self.term.take_responses();
         if !replies.is_empty() {
             self.write(&replies);
@@ -576,6 +699,69 @@ pub fn with_cwd(mut cmd: Command, cwd: Option<&str>) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_line_follows_what_is_sent() {
+        let line = |chunks: &[&[u8]]| {
+            let mut t = TypedLine::default();
+            for c in chunks {
+                t.feed(c);
+            }
+            (!t.edited).then_some(t.text)
+        };
+        assert_eq!(line(&[b"git pu", b"sh --force"]).as_deref(), Some("git push --force"));
+        assert_eq!(line(&[b"rm -rf /x\x7f"]).as_deref(), Some("rm -rf /"));
+        // Enter, Ctrl+C, Ctrl+U and a lone Esc start over
+        assert_eq!(line(&[b"ls\rgit push -f"]).as_deref(), Some("git push -f"));
+        assert_eq!(line(&[b"echo hi\x03git"]).as_deref(), Some("git"));
+        assert_eq!(line(&[b"abc\x15rm -rf ~"]).as_deref(), Some("rm -rf ~"));
+        assert_eq!(line(&[b"abc\x1bx"]).as_deref(), Some(""));
+        // a paste, bracketed, counts as typing
+        assert_eq!(line(&[b"\x1b[200~terraform destroy\x1b[201~"]).as_deref(), Some("terraform destroy"));
+        // replies to the terminal's queries are skipped
+        assert_eq!(line(&[b"git \x1b[?1;2c\x1b]11;rgb:0/0/0\x07push"]).as_deref(), Some("git push"));
+        // cursor keys: no longer sure what the line is
+        assert_eq!(line(&[b"git push\x1b[D\x1b[D"]), None);
+        assert_eq!(line(&[b"x\x1b[3~"]), None);
+        // non-ASCII text
+        assert_eq!(line(&["échø ✓".as_bytes()]).as_deref(), Some("échø ✓"));
+    }
+
+    #[test]
+    fn drain_budget_leaves_the_rest_queued() {
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..10 {
+            tx.send(PtyEvent::Output(vec![b'x'; 1000])).unwrap();
+        }
+        tx.send(PtyEvent::Exited(3)).unwrap();
+        // 2500 bytes: three chunks, then it stops
+        let mut b = Budget::new(2500, std::time::Duration::from_secs(60));
+        let mut got = 0;
+        while b.next(&rx).is_some() {
+            got += 1;
+        }
+        assert_eq!(got, 3);
+        assert!(b.spent());
+        // the next drains pick up the rest, the exit last
+        let mut events = Vec::new();
+        loop {
+            let mut b = Budget::new(2500, std::time::Duration::from_secs(60));
+            while let Some(ev) = b.next(&rx) {
+                events.push(ev);
+            }
+            if !b.spent() {
+                break;
+            }
+        }
+        assert_eq!(events.len(), 8);
+        assert!(matches!(events.last(), Some(PtyEvent::Exited(3))));
+        // out of time: nothing taken
+        tx.send(PtyEvent::Output(vec![1])).unwrap();
+        let mut b = Budget::new(1 << 20, std::time::Duration::ZERO);
+        assert!(b.next(&rx).is_none());
+        assert!(b.spent());
+        assert!(rx.try_recv().is_ok());
+    }
 
     #[cfg(windows)]
     #[test]

@@ -399,7 +399,7 @@ The palette has *Export audit report* (writes `audit-reports/audit-….html` and
 vibex show README.md diagram.png        # or, in a Vibex shell: vshow README.md diagram.png
 ```
 
-PNG images are drawn inline (kitty graphics, so kitty / WezTerm / Ghostty show them too); Markdown is rendered with headings, lists, check boxes, quotes, code blocks, tables and clickable links. `vshow` comes with the shell integration scripts.
+PNG and JPEG pictures are drawn inline (kitty graphics, so kitty / WezTerm / Ghostty show them too), sent at the size they show (a 4K photo at window width is a fraction of the data), and the prompt comes back right below them; Markdown is rendered with headings, lists, check boxes, quotes, code blocks, tables and clickable links. `vshow` comes with the shell integration scripts.
 
 Image size (the aspect is always kept):
 

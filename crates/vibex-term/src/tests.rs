@@ -762,10 +762,192 @@ fn sealed_history_stays_off_screen() {
 fn prompt_input_survives_an_image() {
     let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     let mut t = term(40, 10, "\x1b]133;A\x07PS> \x1b]133;B\x07vshow x\r\n\x1b]133;C\x07");
-    feed(&mut t, &format!("\x1b_Ga=T,f=100,t=d,q=2,c=6,m=0;{png}\x1b\\r\n"));
+    feed(&mut t, &format!("\x1b_Ga=T,f=100,t=d,q=2,c=6,m=0;{png}\x1b\\\r\n"));
     feed(&mut t, "\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07git push --force");
     assert_eq!(t.prompt_input().map(|i| i.text).as_deref(), Some("git push --force"));
     // and after more output scrolls the image away
     feed(&mut t, "\r\n\x1b]133;C\x07a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07rm -rf /");
     assert_eq!(t.prompt_input().map(|i| i.text).as_deref(), Some("rm -rf /"));
+}
+
+#[test]
+fn unescape_633_never_splits_a_character() {
+    use crate::blocks::unescape_633;
+    assert_eq!(unescape_633(r"ls\x3b pwd \\ x"), r"ls; pwd \ x");
+    // \x followed by multi-byte characters: kept as text, no panic
+    assert_eq!(unescape_633(r"a\xé1"), r"a\xé1");
+    assert_eq!(unescape_633(r"\x日本"), r"\x日本");
+    assert_eq!(unescape_633(r"\x4"), r"\x4");
+    let mut t = term(20, 3, "\x1b]633;E;\\x\u{e9}\x07");
+    let _ = t.take_finished();
+}
+
+// ---- audit regressions (2026-11) ----
+
+#[test]
+fn file_refs_with_leading_brackets_and_accents() {
+    // `@(é(1)`: the trimmed text's offsets used to index the untrimmed token
+    let _ = parse_file_ref("@(\u{e9}(1)");
+    assert_eq!(parse_file_ref("(a.cpp(12,5)):"), Some(("a.cpp".into(), Some(12), Some(5))));
+    let t = term(20, 2, "@(\u{e9}(1)");
+    let _ = t.file_ref_at(2, 0);
+}
+
+#[test]
+fn wrapped_search_from_the_middle_of_a_line() {
+    // a 45-character line on 10 columns; search starting at its third row
+    let t = term(10, 6, &"abc ".repeat(11));
+    let re = regex::Regex::new("abc").unwrap();
+    let hits = t.find_regex_wrapped(&re, 2..5);
+    assert!(!hits.is_empty());
+}
+
+#[test]
+fn cursor_report_above_the_region_in_origin_mode() {
+    let mut t = term(20, 12, "\x1b[?6h\x1b7\x1b[5;10r\x1b8\x1b[6n");
+    let r = String::from_utf8(t.take_responses()).unwrap();
+    assert_eq!(r, "\x1b[1;1R");
+    assert!(t.cursor.y >= 4 && t.cursor.y <= 9, "restored inside the region");
+}
+
+#[test]
+fn combining_mark_floods_are_capped() {
+    let start = std::time::Instant::now();
+    let t = term(20, 2, &format!("q{}", "\u{302}".repeat(20_000)));
+    assert!(start.elapsed().as_secs() < 2, "took {:?}", start.elapsed());
+    assert!(crate::grapheme::text(t.screen_row(0).cells[0].c).len() <= 160);
+    // the cell after it still takes normal text
+    let mut t = t;
+    feed(&mut t, "x");
+    assert!(t.screen_text().starts_with('q'));
+}
+
+#[test]
+fn url_hover_after_a_run_of_dots_is_fast() {
+    let line = format!("http://example.com/x{}", ".".repeat(20_000));
+    let t = term(200, 5, &line);
+    // hover the URL itself, on the first row of the long line
+    let first = t.logical_line_bounds(t.total_lines() - 1).0;
+    let start = std::time::Instant::now();
+    let l = t.url_at(3, first).map(|l| l.url);
+    assert!(start.elapsed().as_millis() < 500, "took {:?}", start.elapsed());
+    assert_eq!(l.as_deref(), Some("http://example.com/x"));
+}
+
+#[test]
+fn shrinking_with_a_full_screen_app_open_keeps_shell_lines() {
+    let mut t = term(10, 5, "L1\r\nL2\r\nL3\r\nL4\r\nL5");
+    feed(&mut t, "\x1b[?1049h\x1b[H");
+    t.resize(10, 3);
+    feed(&mut t, "\x1b[?1049l");
+    assert_eq!(t.screen_text(), "L3\nL4\nL5");
+    assert_eq!(t.scrollback_len(), 2);
+    assert_eq!(t.cursor.y, 2, "the prompt line, not old text");
+}
+
+#[test]
+fn reflow_to_an_exact_multiple_keeps_the_wrap_pending() {
+    let mut t = term(10, 4, "abcdefgh");
+    t.resize(4, 4);
+    feed(&mut t, "X");
+    assert!(t.screen_text().starts_with("abcd\nefgh\nX"), "{:?}", t.screen_text());
+}
+
+#[test]
+fn command_text_survives_a_full_history() {
+    let mut t = term(20, 3, "");
+    t.set_scrollback_limit(5);
+    for i in 0..30 {
+        feed(&mut t, &format!("line {i}\r\n"));
+    }
+    // history is full: the Enter below evicts a line between B and C
+    feed(&mut t, "\x1b]133;A\x07$ \x1b]133;B\x07echo hi\r\n\x1b]133;C\x07");
+    for i in 0..2 {
+        feed(&mut t, &format!("out {i}\r\n"));
+    }
+    feed(&mut t, "\x1b]133;D;0\x07");
+    let f = t.take_finished();
+    assert_eq!(f.first().map(|f| f.text.as_str()), Some("echo hi"));
+}
+
+#[test]
+fn full_reset_keeps_what_the_app_owns() {
+    let mut t = term(20, 3, "x\r\ny\r\nz\r\nw");
+    t.set_cell_pixels(11, 23);
+    let (epoch, _) = t.line_base();
+    feed(&mut t, "\x1bc");
+    assert_eq!(t.cell_pixels(), (11, 23));
+    assert_ne!(t.line_base().0, epoch, "line numbering changed");
+}
+
+#[test]
+fn a_mark_never_joins_a_cell_that_scrolled_away() {
+    // LF at the bottom keeps x and y, but the row under the cursor is new
+    let t = term(5, 1, "ab\n\u{301}");
+    assert_eq!(t.screen_text().trim(), "");
+}
+
+#[test]
+fn edits_never_leave_half_a_wide_character() {
+    let check = |t: &Terminal| {
+        let cells = &t.screen_row(0).cells;
+        for (i, c) in cells.iter().enumerate() {
+            if c.has(flags::WIDE_SPACER) {
+                assert!(i > 0 && cells[i - 1].has(flags::WIDE), "orphan right half at {i}: {:?}", t.screen_text());
+            }
+            if c.has(flags::WIDE) {
+                assert!(cells.get(i + 1).is_some_and(|n| n.has(flags::WIDE_SPACER)), "orphan left half at {i}");
+            }
+        }
+    };
+    for seq in ["\x1b[2G\x1b[@", "\x1b[2G\x1b[P", "\x1b[2G\x1b[1K", "\x1b[2G\x1b[1J", "\x1b[4h\x1b[2Gx", "\x1b[7G\x1b[@"] {
+        let t = term(8, 1, &format!("日本語{seq}"));
+        check(&t);
+    }
+}
+
+#[test]
+fn prompt_input_survives_a_width_change() {
+    let mut t = term(40, 6, "out 1\r\nout 2\r\n\x1b]133;A\x07PS C:\\dev> \x1b]133;B\x07git push --force");
+    assert_eq!(t.prompt_input().map(|i| i.text).as_deref(), Some("git push --force"));
+    for cols in [20, 13, 80, 40] {
+        t.resize(cols, 6);
+        assert_eq!(t.prompt_input().map(|i| i.text).as_deref(), Some("git push --force"), "at {cols} columns");
+    }
+    // nothing typed yet: an empty input, not "unknown"
+    let mut t = term(40, 6, "\x1b]133;A\x07$ \x1b]133;B\x07");
+    t.resize(30, 6);
+    assert_eq!(t.prompt_input().map(|i| i.text).as_deref(), Some(""));
+}
+
+#[test]
+fn a_cleared_screen_still_finishes_the_command() {
+    // PowerShell's cls: the prompt row is wiped before 133;D arrives
+    let mut t = term(40, 6, "\x1b]133;A\x07PS> \x1b]133;B\x07cls\r\n\x1b]633;E;cls\x07\x1b]133;C\x07");
+    feed(&mut t, "\x1b[1;1H\x1b[H\x1b[2J\x1b[3J\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07");
+    assert!(t.running_command().is_none());
+    assert_eq!(t.prompt_input().map(|i| i.text).as_deref(), Some(""));
+    let f = t.take_finished();
+    assert_eq!(f.first().map(|f| f.text.as_str()), Some("cls"));
+    feed(&mut t, "git push --force");
+    assert_eq!(t.prompt_input().map(|i| i.text).as_deref(), Some("git push --force"));
+}
+
+#[test]
+fn a_new_prompt_ends_a_command_the_shell_never_finished() {
+    // Ctrl+C in PowerShell: 133;C, "^C", then straight to the next prompt
+    let mut t = term(40, 6, "\x1b]133;A\x07PS> \x1b]133;B\x07Start-Sleep 30\r\n\x1b]633;E;Start-Sleep 30\x07\x1b]133;C\x07");
+    assert!(t.running_command().is_some());
+    feed(&mut t, "^C\r\n\x1b]133;A\x07PS> \x1b]133;B\x07git push --force");
+    assert!(t.running_command().is_none(), "nothing runs at a prompt");
+    assert_eq!(t.prompt_input().map(|i| i.text).as_deref(), Some("git push --force"));
+    let f = t.take_finished();
+    assert_eq!(f.len(), 1);
+    assert_eq!((f[0].text.as_str(), f[0].exit), ("Start-Sleep 30", None), "finished, exit unknown");
+}
+
+#[test]
+fn can_cancels_an_osc() {
+    let t = term(20, 2, "\x1b]0;first\x07\x1b]0;second\x18");
+    assert_eq!(t.title(), "first");
 }

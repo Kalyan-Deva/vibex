@@ -83,6 +83,15 @@ fn parse_keys(keys: &[u8]) -> Cmd {
     c
 }
 
+/// Most images kept for later placement (kitty's own limit is similar).
+const MAX_STORED: usize = 4096;
+
+/// What an image costs against the store's budget: its pixels plus a fixed
+/// overhead for the bookkeeping.
+fn cost(img: &ImageData) -> usize {
+    img.bytes() + 512
+}
+
 /// State kept between APC strings.
 #[derive(Default)]
 pub(crate) struct KittyState {
@@ -99,22 +108,25 @@ pub(crate) struct KittyState {
 impl KittyState {
     fn store(&mut self, id: u32, img: Arc<ImageData>) {
         if let Some(old) = self.images.insert(id, img.clone()) {
-            self.bytes -= old.bytes();
+            self.bytes -= cost(&old);
             self.order.retain(|&i| i != id);
         }
-        self.bytes += img.bytes();
+        self.bytes += cost(&img);
         self.order.push_back(id);
-        while self.bytes > STORE_LIMIT {
+        // a byte budget and a count limit (thousands of 1x1 images cost
+        // more in bookkeeping than in pixels)
+        while self.bytes > STORE_LIMIT || self.images.len() > MAX_STORED {
             let Some(oldest) = self.order.pop_front() else { break };
             if let Some(old) = self.images.remove(&oldest) {
-                self.bytes -= old.bytes();
+                self.bytes -= cost(&old);
+                self.numbers.retain(|_, v| *v != oldest);
             }
         }
     }
 
     fn remove(&mut self, id: u32) {
         if let Some(old) = self.images.remove(&id) {
-            self.bytes -= old.bytes();
+            self.bytes -= cost(&old);
             self.order.retain(|&i| i != id);
             self.numbers.retain(|_, v| *v != id);
         }

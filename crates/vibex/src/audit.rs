@@ -123,14 +123,28 @@ fn string_field(body: &str, key: &str) -> Option<String> {
 fn tail(path: &Path) -> (u64, String) {
     let Ok(mut f) = std::fs::File::open(path) else { return (0, GENESIS.into()) };
     let len = f.metadata().map_or(0, |m| m.len());
-    let from = len.saturating_sub(256 * 1024);
-    let _ = f.seek(SeekFrom::Start(from));
-    let mut buf = String::new();
-    let _ = f.read_to_string(&mut buf);
-    let Some(last) = buf.lines().rev().find(|l| !l.trim().is_empty()) else { return (0, GENESIS.into()) };
-    match unseal(last) {
-        Some((b, h)) => (field(&b, "seq").and_then(|v| v.parse().ok()).unwrap_or(0), h),
-        None => (0, GENESIS.into()),
+    let mut window: u64 = 256 * 1024;
+    loop {
+        let from = len.saturating_sub(window);
+        let mut buf = Vec::new();
+        if f.seek(SeekFrom::Start(from)).is_err() || f.read_to_end(&mut buf).is_err() {
+            return (0, GENESIS.into());
+        }
+        // bytes, not text: the seek can land inside a character. From the
+        // middle of the file the first line is cut, so start after it.
+        let start = if from == 0 { Some(0) } else { buf.iter().position(|&b| b == b'\n').map(|i| i + 1) };
+        let text = start.map(|s| String::from_utf8_lossy(&buf[s..]).into_owned()).unwrap_or_default();
+        if let Some(last) = text.lines().rev().find(|l| !l.trim().is_empty()) {
+            return match unseal(last) {
+                Some((b, h)) => (field(&b, "seq").and_then(|v| v.parse().ok()).unwrap_or(0), h),
+                None => (0, GENESIS.into()),
+            };
+        }
+        if from == 0 {
+            return (0, GENESIS.into());
+        }
+        // the last line is longer than what was read: read more
+        window = window.saturating_mul(4);
     }
 }
 
@@ -396,6 +410,39 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&self.0);
             }
         }
+    }
+
+    #[test]
+    fn a_big_log_with_non_ascii_keeps_its_chain() {
+        let d = tempdir::Dir::new();
+        let p = d.0.join("audit.jsonl");
+        // grow the log past what tail() reads, until the place it seeks to
+        // is in the middle of a character (then add one more entry)
+        let mut n = 0;
+        for k in 0.. {
+            let out = format!("{}{}", "x".repeat(k % 3), "日本語 é ".repeat(2000));
+            append_to(&p, &Entry { output: Some(out), ..entry("cat 日記.txt", 100 + k as u64) }).unwrap();
+            n += 1;
+            let bytes = std::fs::read(&p).unwrap();
+            if bytes.len() > 300 * 1024 {
+                let at = bytes.len() - 256 * 1024;
+                if bytes[at] & 0xc0 == 0x80 {
+                    break;
+                }
+            }
+            assert!(k < 200, "never landed inside a character");
+        }
+        append_to(&p, &entry("whoami", 9999)).unwrap();
+        n += 1;
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(matches!(verify_text(&text), Verdict::Intact { entries, .. } if entries == n), "{:?}", verify_text(&text));
+        assert_eq!(tail(&p).0, n as u64);
+        // a last line longer than the window is still found
+        let big = Entry { output: Some("é".repeat(MAX_OUTPUT)), command: "ö".repeat(300 * 1024), ..entry("x", 1) };
+        append_to(&p, &big).unwrap();
+        append_to(&p, &entry("after", 2)).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(matches!(verify_text(&text), Verdict::Intact { entries, .. } if entries == n + 2), "{:?}", verify_text(&text));
     }
 
     #[test]

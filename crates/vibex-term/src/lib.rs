@@ -23,6 +23,9 @@ use unicode_width::UnicodeWidthChar;
 
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 
+/// The longest grapheme cluster kept (bytes); marks past it are dropped.
+const MAX_CLUSTER_BYTES: usize = 128;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CursorShape {
     #[default]
@@ -158,6 +161,9 @@ pub struct Terminal {
     /// back onto the screen.
     history_fence: usize,
     epoch: u64,
+    /// Image placements on rows, oldest first, with what each costs.
+    placed: std::collections::VecDeque<(u64, usize)>,
+    placed_bytes: usize,
 }
 
 impl Terminal {
@@ -218,6 +224,8 @@ impl Terminal {
             evicted: 0,
             history_fence: 0,
             epoch: 0,
+            placed: std::collections::VecDeque::new(),
+            placed_bytes: 0,
         }
     }
 
@@ -579,12 +587,16 @@ impl Terminal {
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.touch();
+        // the last printed cell moves: nothing may join onto it after this
+        self.last_cell = None;
         let cols = cols.max(2);
         let rows = rows.max(1);
         if cols == self.cols && rows == self.rows {
             return;
         }
 
+        // a wrap pending at the cursor after re-wrapping (primary screen)
+        let mut pending = false;
         if cols != self.cols {
             // Width change: re-wrap the primary screen + history; the
             // alternate screen (full-screen apps) just gets cropped/padded,
@@ -594,39 +606,59 @@ impl Terminal {
             } else {
                 (self.cursor.x + self.wrap_pending as usize, self.cursor.y)
             };
-            let (x, y) = self.reflow_primary(cols, rows, primary_cursor);
+            let (x, y, wrap) = self.reflow_primary(cols, rows, primary_cursor);
             if self.alt_active {
                 if let Some(s) = self.saved_primary.as_mut() {
                     s.cursor.x = x;
                     s.cursor.y = y;
-                    s.wrap_pending = false;
+                    s.wrap_pending = wrap;
                 }
                 resize_plain(&mut self.alternate, cols, rows, &mut self.cursor.y);
             } else {
                 self.cursor.x = x;
                 self.cursor.y = y;
+                pending = wrap;
                 let mut unused = 0;
                 resize_plain(&mut self.alternate, cols, rows, &mut unused);
             }
         } else if rows < self.rows {
             // Rows only: primary screen trades lines with scrollback so the
             // cursor line stays on screen and content isn't lost.
-            let excess = self.rows - rows;
-            let below = self.rows - 1 - self.cursor.y.min(self.rows - 1);
-            let from_bottom = excess.min(below);
-            let from_top = excess - from_bottom;
-            for _ in 0..from_bottom {
+            // Each screen is trimmed around its own cursor: with a
+            // full-screen app open, the shell's lines follow the shell's
+            // saved cursor, not the app's.
+            let (excess, old_rows) = (self.rows - rows, self.rows);
+            let split = |cy: usize| {
+                let below = old_rows - 1 - cy.min(old_rows - 1);
+                let from_bottom = excess.min(below);
+                (from_bottom, excess - from_bottom)
+            };
+            // no saved cursor: keep the newest lines (trim from the top)
+            let primary_y = if self.alt_active { self.saved_primary.map_or(old_rows - 1, |s| s.cursor.y) } else { self.cursor.y };
+            let (pb, pt) = split(primary_y);
+            for _ in 0..pb {
                 self.primary.pop();
+            }
+            for _ in 0..pt {
+                let row = self.primary.remove(0);
+                let _ = self.push_scrollback(row);
+            }
+            let alt_y = if self.alt_active { self.cursor.y } else { 0 };
+            let (ab, at) = split(alt_y);
+            for _ in 0..ab {
                 self.alternate.pop();
             }
-            for _ in 0..from_top {
-                let row = self.primary.remove(0);
-                if !self.alt_active {
-                    let _ = self.push_scrollback(row);
-                }
+            for _ in 0..at {
                 self.alternate.remove(0);
             }
-            self.cursor.y = self.cursor.y.saturating_sub(from_top);
+            if self.alt_active {
+                self.cursor.y = self.cursor.y.saturating_sub(at);
+                if let Some(s) = self.saved_primary.as_mut() {
+                    s.cursor.y = s.cursor.y.saturating_sub(pt);
+                }
+            } else {
+                self.cursor.y = self.cursor.y.saturating_sub(pt);
+            }
         } else if rows > self.rows {
             let extra = rows - self.rows;
             let mut pulled = 0;
@@ -662,7 +694,7 @@ impl Terminal {
         self.tabs = default_tabs(cols);
         self.cursor.x = self.cursor.x.min(cols - 1);
         self.cursor.y = self.cursor.y.min(rows - 1);
-        self.wrap_pending = false;
+        self.wrap_pending = pending;
         self.display_offset = self.display_offset.min(self.scrollback.len());
     }
 
@@ -732,6 +764,12 @@ impl Terminal {
         if !joins {
             return false;
         }
+        // no real cluster is this long: a flood of combining marks (or ZWJs)
+        // would otherwise cost n² time and fill the shared cluster table
+        if prev_text.len() >= MAX_CLUSTER_BYTES {
+            self.join_next = false;
+            return true;
+        }
         self.join_next = c == grapheme::ZWJ;
         let cols = self.cols;
         let row = &mut self.screen_mut()[ly];
@@ -744,6 +782,8 @@ impl Terminal {
             let mut spacer = pen;
             spacer.c = ' ';
             spacer.flags = (spacer.flags & !flags::WIDE) | flags::WIDE_SPACER;
+            // the cell it widens over may be half of another wide character
+            clear_wide_partner(&mut row.cells, lx + 1);
             row.cells[lx + 1] = spacer;
             let next = lx + 2;
             if next >= cols {
@@ -807,10 +847,12 @@ impl Terminal {
         let row = &mut self.screen_mut()[y];
 
         if insert {
+            blank_split(&mut row.cells, x);
             for _ in 0..width {
                 row.cells.insert(x, blank);
                 row.cells.truncate(cols);
             }
+            fix_right_edge(&mut row.cells);
         }
 
         clear_wide_partner(&mut row.cells, x);
@@ -866,6 +908,7 @@ impl Terminal {
 
     /// Scroll the scroll region up by `n` (content moves up).
     pub(crate) fn scroll_up(&mut self, n: usize) {
+        self.last_cell = None;
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
         let blank = self.blank();
@@ -896,6 +939,7 @@ impl Terminal {
 
     /// Scroll the scroll region down by `n` (content moves down).
     pub(crate) fn scroll_down(&mut self, n: usize) {
+        self.last_cell = None;
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
         let blank = self.blank();
@@ -1013,6 +1057,8 @@ impl Terminal {
                     self.screen_mut()[r].reset(blank);
                 }
                 let row = &mut self.screen_mut()[y];
+                // a wide character under the cursor: its right half too
+                clear_wide_partner(&mut row.cells, x);
                 for c in &mut row.cells[..=x] {
                     *c = blank;
                 }
@@ -1046,6 +1092,10 @@ impl Terminal {
         if range.start > 0 {
             clear_wide_partner(&mut row.cells, range.start);
         }
+        if mode == 1 {
+            // the cursor's cell is erased: a wide one takes its right half
+            clear_wide_partner(&mut row.cells, x);
+        }
         for c in &mut row.cells[range] {
             *c = blank;
         }
@@ -1075,10 +1125,13 @@ impl Terminal {
         let (x, y, cols) = (self.cursor.x, self.cursor.y, self.cols);
         let row = &mut self.screen_mut()[y];
         let n = n.min(cols - x);
+        // a wide character split by the insert point loses both halves
+        blank_split(&mut row.cells, x);
         for _ in 0..n {
             row.cells.insert(x, blank);
         }
         row.cells.truncate(cols);
+        fix_right_edge(&mut row.cells);
         self.wrap_pending = false;
     }
 
@@ -1087,6 +1140,9 @@ impl Terminal {
         let (x, y, cols) = (self.cursor.x, self.cursor.y, self.cols);
         let row = &mut self.screen_mut()[y];
         let n = n.min(cols - x);
+        // wide characters cut at either edge of the deleted run
+        clear_wide_partner(&mut row.cells, x);
+        blank_split(&mut row.cells, x + n);
         row.cells.drain(x..x + n);
         row.cells.resize(cols, blank);
         self.wrap_pending = false;
@@ -1120,6 +1176,7 @@ impl Terminal {
     }
 
     fn scroll_up_no_history(&mut self, n: usize) {
+        self.last_cell = None;
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
         let blank = self.blank();
@@ -1158,6 +1215,11 @@ impl Terminal {
                 self.cursor.y = self.cursor.y.min(self.rows - 1);
                 self.modes.origin = s.origin;
                 self.wrap_pending = s.wrap_pending;
+                // origin mode: the cursor lives inside the scroll region,
+                // which may have changed since the save
+                if s.origin {
+                    self.cursor.y = self.cursor.y.clamp(self.scroll_top, self.scroll_bottom);
+                }
             }
             None => {
                 self.cursor = Cursor::default();
@@ -1175,6 +1237,7 @@ impl Terminal {
             self.save_cursor();
         }
         self.alt_active = true;
+        self.last_cell = None;
         self.display_offset = 0;
         if clear {
             let blank = self.blank();
@@ -1189,6 +1252,7 @@ impl Terminal {
             return;
         }
         self.alt_active = false;
+        self.last_cell = None;
         if restore_cursor {
             self.restore_cursor();
         }
@@ -1216,7 +1280,8 @@ impl Terminal {
     }
 
     pub(crate) fn report_cursor(&mut self) {
-        let y = if self.modes.origin { self.cursor.y - self.scroll_top } else { self.cursor.y };
+        // the cursor can sit above the region (set after the cursor moved)
+        let y = if self.modes.origin { self.cursor.y.saturating_sub(self.scroll_top) } else { self.cursor.y };
         let s = format!("\x1b[{};{}R", y + 1, self.cursor.x + 1);
         self.respond(s.as_bytes());
     }
@@ -1235,9 +1300,39 @@ impl Terminal {
     pub(crate) fn full_reset(&mut self) {
         let (cols, rows, limit) = (self.cols, self.rows, self.scrollback_limit);
         let title = std::mem::take(&mut self.title);
+        let responses = std::mem::take(&mut self.responses);
+        // what the app owns, not the program: the cell size, the line
+        // numbering (history is gone: those lines count as evicted) and the
+        // redraw counter
+        let (cell_px, generation) = (self.cell_px, self.generation);
+        let (evicted, epoch) = (self.evicted + self.scrollback.len() as u64, self.epoch.wrapping_add(1));
         *self = Terminal::new(cols, rows);
         self.scrollback_limit = limit;
         self.title = title;
+        self.responses = responses;
+        self.cell_px = cell_px;
+        self.generation = generation.wrapping_add(1);
+        self.evicted = evicted;
+        self.epoch = epoch;
+    }
+}
+
+/// After cells were shifted right (insert): a wide character pushed into
+/// the last column has lost its right half, so blank it.
+fn fix_right_edge(cells: &mut [Cell]) {
+    if let Some(last) = cells.last_mut() {
+        if last.has(flags::WIDE) {
+            *last = Cell { bg: last.bg, ..Cell::default() };
+        }
+    }
+}
+
+/// A cut between the two halves of a wide character at `x` (its right
+/// half is at `x`): blank both, since text is about to move between them.
+fn blank_split(cells: &mut [Cell], x: usize) {
+    if x > 0 && x < cells.len() && cells[x].has(flags::WIDE_SPACER) {
+        cells[x - 1] = Cell { bg: cells[x - 1].bg, ..Cell::default() };
+        cells[x] = Cell { bg: cells[x].bg, ..Cell::default() };
     }
 }
 

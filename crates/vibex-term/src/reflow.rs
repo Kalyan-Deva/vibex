@@ -14,10 +14,15 @@ fn finish(out: &mut Vec<Row>, mut cells: Vec<Cell>, wrapped: bool, cols: usize, 
 
 impl Terminal {
     /// Re-wrap scrollback + primary screen to `cols` x `rows`.
-    /// `cursor` is the primary cursor `(x, y)`; returns its new position.
-    pub(crate) fn reflow_primary(&mut self, cols: usize, rows: usize, cursor: (usize, usize)) -> (usize, usize) {
+    /// `cursor` is the primary cursor `(x, y)`; returns its new position,
+    /// and whether a wrap is pending there (the line exactly fills its last
+    /// row, so the next character goes on a new row).
+    pub(crate) fn reflow_primary(&mut self, cols: usize, rows: usize, cursor: (usize, usize)) -> (usize, usize, bool) {
         let cursor_line = self.scrollback.len() + cursor.1;
-        // restored history ends here: that row starts the live session
+        // where typing began at the prompt: carried across, like the cursor
+        let input = self.input_start();
+        let mut input_at: Option<(usize, usize)> = None; // (logical line, cell offset)
+                                                         // restored history ends here: that row starts the live session
         let fence_row = (self.history_fence > 0).then_some(self.history_fence);
         let mut fence_logical: Option<usize> = None;
         // every line number changes
@@ -38,8 +43,9 @@ impl Terminal {
         let mut cursor_at: Option<(usize, usize)> = None; // (logical line, cell offset)
         let mut buf: Vec<Cell> = Vec::new();
         for (i, mut row) in all.into_iter().enumerate() {
-            if Some(i) == fence_row && buf.is_empty() && fence_logical.is_none() {
-                fence_logical = Some(logical.len());
+            if Some(i) == fence_row && fence_logical.is_none() {
+                // inside a wrapped line: the fence goes after that line
+                fence_logical = Some(logical.len() + usize::from(!buf.is_empty()));
             }
             if line_mark.is_none() {
                 line_mark = row.prompt;
@@ -50,6 +56,9 @@ impl Terminal {
             for (x, cell) in row.cells.iter().enumerate() {
                 if i == cursor_line && x == cursor.0 {
                     cursor_at = Some((logical.len(), buf.len()));
+                }
+                if input == Some((i, x)) {
+                    input_at = Some((logical.len(), buf.len()));
                 }
                 if !cell.has(flags::WRAP_PAD) {
                     buf.push(*cell);
@@ -81,9 +90,12 @@ impl Terminal {
         // 2. Wrap each logical line at the new width.
         let mut out: Vec<Row> = Vec::new();
         let mut new_cursor = (0, 0);
+        let mut pending = false;
+        let mut new_input: Option<(usize, usize)> = None; // (row in `out`, column)
         let mut fence_out: Option<usize> = None;
         for (li, cells) in logical.iter().enumerate() {
             let cursor_off = cursor_at.filter(|c| c.0 == li).map(|c| c.1);
+            let input_off = input_at.filter(|c| c.0 == li).map(|c| c.1);
             let first_row = out.len();
             if Some(li) == fence_logical {
                 fence_out = Some(first_row);
@@ -103,6 +115,9 @@ impl Terminal {
                     }
                     finish(&mut out, std::mem::take(&mut row), true, cols, mark.take());
                 }
+                if input_off == Some(i) {
+                    new_input = Some((out.len(), row.len()));
+                }
                 if cursor_off == Some(i) {
                     new_cursor = (row.len(), out.len());
                     placed = true;
@@ -119,8 +134,14 @@ impl Terminal {
                     i += 1;
                 }
             }
+            if input_off.is_some_and(|o| o >= cells.len()) {
+                // typing starts just after the prompt's last character
+                new_input = Some((out.len(), row.len().min(cols - 1)));
+            }
             if cursor_off.is_some() && !placed {
-                // cursor sits just after the text
+                // cursor sits just after the text; on a full row that's a
+                // pending wrap at the last column
+                pending = row.len() >= cols;
                 new_cursor = (row.len().min(cols - 1), out.len());
             }
             finish(&mut out, row, false, cols, mark.take());
@@ -163,10 +184,15 @@ impl Terminal {
         if fence_row.is_some() {
             self.history_fence = fence_at.map_or(0, |f| f.min(self.scrollback.len()));
         }
+        let mut trimmed = 0;
         while self.scrollback.len() > self.scrollback_limit {
             self.scrollback.pop_front();
+            self.history_fence = self.history_fence.saturating_sub(1);
+            trimmed += 1;
         }
+        // the prompt input's new place, in the new numbering
+        self.blocks.input_at = new_input.and_then(|(row, x)| row.checked_sub(trimmed).map(|line| (line as u64 + self.evicted, x, self.epoch)));
         self.display_offset = 0;
-        (new_cursor.0.min(cols - 1), new_cursor.1 - start)
+        (new_cursor.0.min(cols - 1), new_cursor.1 - start, pending)
     }
 }

@@ -1,5 +1,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// `println!` for the command-line side: when the reader hangs up early
+/// (`vibex cli list | head -1`), stop quietly instead of panicking with
+/// "failed printing to stdout". (Before the `mod`s, so they can use it.)
+macro_rules! outln {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(e) = writeln!(std::io::stdout(), $($t)*) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
+        }
+    }};
+}
+
 mod access;
 mod audit;
 mod bundle;
@@ -72,6 +86,22 @@ enum AppEvent {
     Editors(bundle::Msg, bool),
 }
 
+/// An `AppEvent::Pty` is queued (or output is being worked through):
+/// readers don't post another, so a flood can't fill the event queue.
+static PTY_WAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Bumped for every chunk of output, so a drain can tell whether more came
+/// in while it ran.
+static PTY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A PTY reader has output: wake the event loop (once).
+fn pty_wake(proxy: &EventLoopProxy<AppEvent>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    PTY_SEQ.fetch_add(1, SeqCst);
+    if !PTY_WAKE.swap(true, SeqCst) {
+        let _ = proxy.send_event(AppEvent::Pty);
+    }
+}
+
 impl From<accesskit_winit::Event> for AppEvent {
     fn from(e: accesskit_winit::Event) -> Self {
         AppEvent::Access(e)
@@ -120,11 +150,30 @@ struct Tab {
     /// A pane floating over the splits, and whether it's showing.
     float: Option<PaneId>,
     float_shown: bool,
+    /// Stays the same while tabs around it open, close and move, so a menu
+    /// or question about this tab still finds it (unique in the process).
+    key: u64,
+}
+
+/// A fresh `Tab::key`.
+fn next_tab_key() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Tab {
     fn new(id: PaneId) -> Tab {
-        Tab { root: Node::Leaf(id), active: id, zoomed: false, title: None, color: None, broadcast: false, float: None, float_shown: false }
+        Tab {
+            root: Node::Leaf(id),
+            active: id,
+            zoomed: false,
+            title: None,
+            color: None,
+            broadcast: false,
+            float: None,
+            float_shown: false,
+            key: next_tab_key(),
+        }
     }
 
     /// The floating pane, if it's on screen.
@@ -139,8 +188,9 @@ enum MenuCmd {
     Act(Action),
     OpenLink(String),
     Copy(String),
-    /// Something done to the tab at this index (the tab right-click menu).
-    Tab(TabCmd, usize),
+    /// Something done to the tab with this `Tab::key` (the tab right-click
+    /// menu).
+    Tab(TabCmd, u64),
     /// Type this at the prompt (a completion).
     Type(String),
     /// A Settings dropdown choice.
@@ -193,7 +243,10 @@ enum ConfirmAct {
     Paste(String),
     /// Send the held Enter to this pane.
     Enter(PaneId),
-    CloseTab(usize),
+    /// The tab with this `Tab::key`.
+    CloseTab(u64),
+    /// "Close other tabs" / "Close tabs to the right".
+    CloseTabs(Vec<u64>),
     ClosePane(PaneId),
     CloseWindow,
     /// Download and swap in newer nano / Neovim.
@@ -287,8 +340,8 @@ struct Session {
     quick: Option<Quick>,
     /// IME composition in progress (drawn at the cursor).
     preedit: Option<String>,
-    /// Renaming a tab: (tab index, text so far).
-    rename: Option<(usize, String)>,
+    /// Renaming a tab: (its `Tab::key`, text so far).
+    rename: Option<(u64, String)>,
     tab_drag: Option<TabDrag>,
     last_tab_click: Option<(Instant, usize)>,
     // multi-click
@@ -408,6 +461,9 @@ struct App {
     sessions: HashMap<WindowId, Session>,
     /// Shown as a toast in the first window (e.g. hotkey already taken).
     notice: Option<String>,
+    /// A drain stopped at its budget: post another `AppEvent::Pty` once
+    /// the queue is empty.
+    pty_more: bool,
 }
 
 /// Load the config (fresh, so edits since start apply) for a new window.
@@ -481,7 +537,7 @@ fn settings_dialog_rect(content: PxRect, scale: f32) -> PxRect {
 
 fn run_cli(mut args: Vec<String>) -> i32 {
     if args.is_empty() || matches!(args[0].as_str(), "help" | "--help" | "-h") {
-        println!("{CLI_USAGE}");
+        outln!("{CLI_USAGE}");
         return 0;
     }
     // the pane this command runs in (if inside Vibex): default target
@@ -497,7 +553,7 @@ fn run_cli(mut args: Vec<String>) -> i32 {
         Some(reply) if reply == "ok" || reply.starts_with("ok\n") => {
             let text = reply.strip_prefix("ok").unwrap_or("").strip_prefix('\n').unwrap_or("");
             if !text.is_empty() {
-                println!("{text}");
+                outln!("{text}");
             }
             0
         }
@@ -570,8 +626,30 @@ pub(crate) fn split_command(s: &str) -> Vec<String> {
     out
 }
 
+/// Ctrl+Right on a suggestion: up to and including the end of the next
+/// word (the space or path separator after it), as a byte offset.
+fn next_word_end(rest: &str) -> usize {
+    let trimmed = rest.trim_start();
+    let lead = rest.len() - trimmed.len();
+    // the separator may be a wide space (NBSP, U+3000): step over all of it
+    let end = trimmed.char_indices().find(|(_, c)| c.is_whitespace() || "/\\".contains(*c)).map_or(trimmed.len(), |(i, c)| i + c.len_utf8());
+    lead + end
+}
+
 #[cfg(test)]
 mod split_tests {
+    #[test]
+    fn next_word_with_wide_spaces() {
+        use super::next_word_end;
+        assert_eq!(next_word_end("git status"), 4);
+        assert_eq!(next_word_end("  src/main.rs"), 6);
+        assert_eq!(next_word_end("echo"), 4);
+        let s = "echo\u{a0}hi";
+        assert_eq!(&s[..next_word_end(s)], "echo\u{a0}");
+        let s = "ls\u{3000}x";
+        assert_eq!(&s[..next_word_end(s)], "ls\u{3000}");
+    }
+
     #[test]
     fn words_and_quotes() {
         assert_eq!(super::split_command("lazygit"), ["lazygit"]);
@@ -1039,8 +1117,17 @@ impl App {
                 flags.entry("--from-pane".into()).or_insert_with(|| v.clone());
             }
         }
-        let pane: Option<PaneId> = flags.get("--pane").or(flags.get("--from-pane")).and_then(|v| v.parse().ok());
         let find = |sessions: &HashMap<WindowId, Session>, id: PaneId| sessions.iter().find(|(_, s)| s.panes.contains_key(&id)).map(|(w, _)| *w);
+        // an explicit --pane must exist (never fall back to another pane);
+        // the inherited --from-pane ($VIBEX_PANE) may be stale: then it's
+        // as if none was given
+        let pane: Option<PaneId> = match flags.get("--pane") {
+            Some(v) => match v.parse::<PaneId>().ok().filter(|id| find(&self.sessions, *id).is_some()) {
+                Some(id) => Some(id),
+                None => return "error: no such pane".into(),
+            },
+            None => flags.get("--from-pane").and_then(|v| v.parse().ok()).filter(|id| find(&self.sessions, *id).is_some()),
+        };
         // the window to act in: the pane's, else a visible one
         let window = pane
             .and_then(|p| find(&self.sessions, p))
@@ -1349,6 +1436,9 @@ impl App {
                         None => s.active_tab,
                     };
                     let to = match flags.get("--window").and_then(|v| v.parse::<u64>().ok()) {
+                        // already there: nothing to do (taking a window's
+                        // last tab out would close it, shells and all)
+                        Some(id) if !flags.contains_key("--new-window") && id == u64::from(w) => return Ok(String::new()),
                         Some(id) if !flags.contains_key("--new-window") => MoveTarget::Window(id, None),
                         _ => MoveTarget::NewWindow(None),
                     };
@@ -1400,12 +1490,14 @@ impl App {
         let moves: Vec<(WindowId, TabMove)> =
             self.sessions.iter_mut().flat_map(|(id, s)| std::mem::take(&mut s.tab_moves).into_iter().map(|m| (*id, m)).collect::<Vec<_>>()).collect();
         for (from, m) in moves {
-            // where it goes: (window, index) or a new window at a point
+            // where it goes: (window, index) or a new window at a point;
+            // never into a window that's closing (it would take the shells
+            // with it)
             let target = match m.to {
-                MoveTarget::Window(id, at) => self.sessions.keys().copied().find(|w| u64::from(*w) == id).map(|w| (w, at)),
+                MoveTarget::Window(id, at) => self.sessions.iter().find(|(w, s)| u64::from(**w) == id && !s.quit).map(|(w, _)| (*w, at)),
                 MoveTarget::NewWindow(_) => None,
                 MoveTarget::Drop(p) => self.sessions.iter().find_map(|(id, s)| {
-                    if *id == from || s.detached.is_some() || s.quake {
+                    if *id == from || s.detached.is_some() || s.quake || s.quit {
                         return None;
                     }
                     let origin = s.window.inner_position().ok()?;
@@ -1790,6 +1882,7 @@ impl Session {
                     active,
                     title: t.title.clone(),
                     color: t.color,
+                    key: next_tab_key(),
                 });
             }
         }
@@ -1934,9 +2027,7 @@ impl Session {
         cmd.env.push(("VIBEX_CELL_PX".into(), format!("{}x{}", self.renderer.fonts.cell_width as u32, self.renderer.fonts.cell_height as u32)));
         commands::prepare_with(&mut cmd, self.config.linux_commands, &self.config.prompt);
         let proxy = self.proxy.clone();
-        let pane = Pane::spawn(id, &p.name, &cmd, cols, rows, &self.pane_options(), move || {
-            let _ = proxy.send_event(AppEvent::Pty);
-        })?;
+        let pane = Pane::spawn(id, &p.name, &cmd, cols, rows, &self.pane_options(), move || pty_wake(&proxy))?;
         self.panes.insert(id, pane);
         Ok(id)
     }
@@ -1979,6 +2070,9 @@ impl Session {
         if let Some(p) = self.panes.remove(&id) {
             p.kill();
         }
+        // a drag in progress may point at this pane's split or tab
+        self.dragging = None;
+        self.tab_drag = None;
         if self.selecting_pane == Some(id) {
             self.selecting_pane = None;
         }
@@ -2043,13 +2137,42 @@ impl Session {
         self.window.request_redraw();
     }
 
+    /// Where the tab with this `Tab::key` is now (None once it's gone).
+    fn tab_index(&self, key: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| t.key == key)
+    }
+
     fn request_close_tab(&mut self, i: usize) {
         let Some(tab) = self.tabs.get(i) else { return };
+        let key = tab.key;
         let busy: Vec<String> = tab.root.panes().into_iter().chain(tab.float).filter_map(|id| self.busy(id)).collect();
         if self.config.confirm_close && !busy.is_empty() {
-            self.ask("Close this tab?", busy, "Close tab", true, ConfirmAct::CloseTab(i));
+            self.ask("Close this tab?", busy, "Close tab", true, ConfirmAct::CloseTab(key));
         } else {
             self.close_tab(i);
+        }
+    }
+
+    /// Close several tabs (by `Tab::key`), asking first, as for one tab,
+    /// when something is running in them.
+    fn request_close_tabs(&mut self, keys: Vec<u64>) {
+        let mut busy = Vec::new();
+        for t in self.tabs.iter().filter(|t| keys.contains(&t.key)) {
+            busy.extend(t.root.panes().into_iter().chain(t.float).filter_map(|id| self.busy(id)));
+        }
+        if self.config.confirm_close && !busy.is_empty() {
+            let title = if keys.len() == 1 { "Close this tab?".to_string() } else { format!("Close {} tabs?", keys.len()) };
+            self.ask(&title, busy, "Close tabs", true, ConfirmAct::CloseTabs(keys));
+        } else {
+            self.close_tabs(&keys);
+        }
+    }
+
+    fn close_tabs(&mut self, keys: &[u64]) {
+        for k in keys {
+            if let Some(i) = self.tab_index(*k) {
+                self.close_tab(i);
+            }
         }
     }
 
@@ -2122,6 +2245,9 @@ impl Session {
         }
         self.remember_closed(i);
         let tab = self.tabs.remove(i);
+        // tab indices (and splits) moved under any drag in progress
+        self.tab_drag = None;
+        self.dragging = None;
         for id in tab.root.panes().into_iter().chain(tab.float) {
             if let Some(p) = self.panes.remove(&id) {
                 p.kill();
@@ -2147,6 +2273,8 @@ impl Session {
         let tab = self.tabs.remove(i);
         let ids: Vec<PaneId> = tab.root.panes().into_iter().chain(tab.float).collect();
         let panes = ids.iter().filter_map(|id| self.panes.remove(id).map(|p| (*id, p))).collect();
+        self.tab_drag = None;
+        self.dragging = None;
         self.selecting_pane = None;
         self.quick = None;
         self.palette = None;
@@ -2192,8 +2320,9 @@ impl Session {
 
     /// The tab right-click menu.
     fn open_tab_menu(&mut self, i: usize, x: f64, y: f64) {
+        let Some(key) = self.tabs.get(i).map(|t| t.key) else { return };
         let hint = |a: &Action| self.config.bindings.iter().find(|b| &b.action == a).map(|b| b.describe()).unwrap_or_default();
-        let it = |label: String, hint: String, sep: bool, cmd: TabCmd| (MenuItem { label, hint, separator: sep, icon: None }, MenuCmd::Tab(cmd, i));
+        let it = |label: String, hint: String, sep: bool, cmd: TabCmd| (MenuItem { label, hint, separator: sep, icon: None }, MenuCmd::Tab(cmd, key));
         let mut items = vec![
             it("Rename tab".into(), hint(&Action::RenameTab), false, TabCmd::Rename),
             it("Tab colour…".into(), String::new(), false, TabCmd::Color),
@@ -2220,10 +2349,11 @@ impl Session {
         self.window.request_redraw();
     }
 
-    fn run_tab_cmd(&mut self, cmd: TabCmd, i: usize) {
-        if i >= self.tabs.len() {
-            return;
-        }
+    fn run_tab_cmd(&mut self, cmd: TabCmd, key: u64) {
+        // the tab may have closed or moved since the menu opened
+        let Some(i) = self.tab_index(key) else { return };
+        // right to left, as "Reopen closed tab" puts them back
+        let keys_rev = |r: std::ops::Range<usize>, tabs: &[Tab]| r.rev().filter(|j| *j != i).map(|j| tabs[j].key).collect::<Vec<u64>>();
         match cmd {
             TabCmd::Rename => {
                 self.activate_tab(i);
@@ -2240,16 +2370,12 @@ impl Session {
             }
             TabCmd::ToWindow(id) => self.move_tab(i, MoveTarget::Window(id, None)),
             TabCmd::CloseOthers => {
-                for j in (0..self.tabs.len()).rev() {
-                    if j != i {
-                        self.close_tab(j);
-                    }
-                }
+                let keys = keys_rev(0..self.tabs.len(), &self.tabs);
+                self.request_close_tabs(keys);
             }
             TabCmd::CloseRight => {
-                for j in (i + 1..self.tabs.len()).rev() {
-                    self.close_tab(j);
-                }
+                let keys = keys_rev(i + 1..self.tabs.len(), &self.tabs);
+                self.request_close_tabs(keys);
             }
             TabCmd::Close => self.request_close_tab(i),
         }
@@ -2325,7 +2451,7 @@ impl Session {
             .map(|(i, t)| {
                 let p = &self.panes[&t.active];
                 let n = t.root.panes().len();
-                let editing = self.rename.as_ref().filter(|(ti, _)| *ti == i).map(|(_, s)| s.clone());
+                let editing = self.rename.as_ref().filter(|(key, _)| *key == t.key).map(|(_, s)| s.clone());
                 let rule = p.ssh_host.as_deref().and_then(|h| ssh::rule_for(h, &self.config.ssh_hosts));
                 let base = match (&p.ssh_host, rule.and_then(|r| r.label.as_deref())) {
                     (Some(h), Some(label)) if !p.ssh_fixed || t.title.as_deref() == Some(h.as_str()) => format!("{label} · {h}"),
@@ -2479,32 +2605,57 @@ impl Session {
         c.args = args.to_vec();
         let c = pane::with_cwd(c, self.current_cwd().as_deref());
         match self.spawn_command(program, c) {
-            Ok(id) => {
-                let old = self.tabs[self.active_tab].float.replace(id);
-                self.tabs[self.active_tab].float_shown = true;
-                if let Some(old) = old {
-                    if let Some(p) = self.panes.remove(&old) {
-                        p.kill();
-                    }
-                }
-                self.after_focus_change();
-            }
+            Ok(id) => self.show_popup(id),
             Err(e) => self.toast(e, 4.0),
         }
     }
 
-    fn drain_all(&mut self) {
+    /// Put a new pane in the tab's floating spot. The pane there now goes,
+    /// unless something is running in it (your floating shell mid-command):
+    /// then the popup opens in a tab of its own instead.
+    fn show_popup(&mut self, id: PaneId) {
+        let old = self.tabs[self.active_tab].float;
+        if old.is_some_and(|o| self.busy(o).is_some()) {
+            self.tabs.push(Tab::new(id));
+            self.active_tab = self.tabs.len() - 1;
+            self.toast("Your floating pane is busy: this opened in a new tab", 3.0);
+            self.after_focus_change();
+            return;
+        }
+        let tab = &mut self.tabs[self.active_tab];
+        tab.float = Some(id);
+        tab.float_shown = true;
+        if let Some(old) = old {
+            if let Some(p) = self.panes.remove(&old) {
+                p.kill();
+            }
+        }
+        self.after_focus_change();
+    }
+
+    /// Feed every pane's output in. True when some pane stopped at its
+    /// budget and has more waiting.
+    fn drain_all(&mut self) -> bool {
+        if self.quit || self.tabs.is_empty() {
+            return false;
+        }
         let active = self.active_id();
         let visible = self.visible_panes();
         let mut exited = Vec::new();
         let mut redraw = false;
+        let mut more = false;
         let ids: Vec<PaneId> = self.panes.keys().copied().collect();
         for id in ids {
-            let d = self.panes.get_mut(&id).unwrap().drain();
+            // Lua (events, triggers) may have closed panes, or the window
+            if self.quit || self.tabs.is_empty() {
+                return false;
+            }
+            let Some(p) = self.panes.get_mut(&id) else { continue };
+            let d = p.drain();
+            more |= d.more;
             let shown = visible.contains(&id);
             redraw |= shown && d.changed;
             if d.changed && !shown {
-                let p = self.panes.get_mut(&id).unwrap();
                 // the tab bar's activity dot appears: one redraw
                 redraw |= !p.activity;
                 p.activity = true;
@@ -2534,12 +2685,13 @@ impl Session {
                 } else {
                     String::new() // refused: answer empty so the program doesn't hang
                 };
-                let p = self.panes.get_mut(&id).unwrap();
-                for _ in 0..d.clipboard_reads.min(4) {
-                    p.term.reply_clipboard(&text);
+                if let Some(p) = self.panes.get_mut(&id) {
+                    for _ in 0..d.clipboard_reads.min(4) {
+                        p.term.reply_clipboard(&text);
+                    }
+                    let replies = p.term.take_responses();
+                    p.write(&replies);
                 }
-                let replies = p.term.take_responses();
-                p.write(&replies);
             }
             if self.config.notifications {
                 for (title, body) in d.notifications {
@@ -2567,10 +2719,9 @@ impl Session {
                     });
                 }
             }
-            if (self.config.audit_log || self.eng.is_some()) && !finished.is_empty() {
+            if let Some(p) = self.panes.get(&id).filter(|_| (self.config.audit_log || self.eng.is_some()) && !finished.is_empty()) {
                 let log = self.eng.as_ref().map(|e| e.audit_path()).or_else(audit::path);
                 let keep_output = self.config.audit_output || self.eng.is_some();
-                let p = &self.panes[&id];
                 let output = p.term.last_finished_block().map(|b| p.term.block_output(&b)).unwrap_or_default();
                 let output = if self.config.secret_guard { self.config.secrets.redact(&output) } else { output };
                 let (machine, user) = audit::who();
@@ -2653,13 +2804,14 @@ impl Session {
         for id in exited {
             self.close_pane(id);
         }
-        if !self.quit && self.tabs.iter().any(|t| t.root.panes().iter().any(|id| self.panes[id].activity)) {
+        if !self.quit && self.tabs.iter().any(|t| t.root.panes().iter().any(|id| self.panes.get(id).is_some_and(|p| p.activity))) {
             self.relayout_tabbar();
         }
         // output that only answered queries (cursor reports etc.) draws nothing
         if redraw {
             self.window.request_redraw();
         }
+        more
     }
 
     fn relayout_tabbar(&mut self) {
@@ -2779,6 +2931,21 @@ impl Session {
                 self.window.request_redraw();
             }
         }
+    }
+
+    /// The GPU renderer lost its device: switch this window to the CPU one.
+    fn fall_back_to_cpu(&mut self) {
+        let cpu = softbuffer::Context::new(self.window.clone())
+            .and_then(|context| softbuffer::Surface::new(&context, self.window.clone()).map(|surface| (context, surface)));
+        match cpu {
+            Ok((context, surface)) => {
+                self.window.set_transparent(false);
+                self.backend = Backend::Cpu { _context: context, surface, last: Vec::new(), scratch: Vec::new() };
+                self.toast("The graphics driver reset: Vibex switched to its software renderer for this window", 5.0);
+            }
+            Err(e) => eprintln!("vibex: GPU lost and no CPU renderer: {e}"),
+        }
+        self.window.request_redraw();
     }
 
     fn redraw(&mut self) {
@@ -2966,6 +3133,11 @@ impl Session {
                 gpu.resize(w.get(), h.get());
                 let o = if self.config.glass { glass_opacity(self.opacity) } else { acrylic_opacity(self.opacity) };
                 gpu.render(&scene, &mut self.renderer.fonts, o);
+                if gpu.device_lost() {
+                    // the GPU went away (driver reset, sleep, GPU switch):
+                    // carry on with the CPU renderer instead of freezing
+                    self.fall_back_to_cpu();
+                }
             }
             Backend::Cpu { surface, last, scratch, .. } => {
                 if surface.resize(w, h).is_err() {
@@ -3116,7 +3288,7 @@ impl Session {
                 // move the tab to wherever the pointer is along the bar
                 let bar_y = self.tabbar.height / 2.0;
                 if let Some(TabHit::Tab(j) | TabHit::CloseTab(j)) = self.tabbar.hit(x as f32, bar_y) {
-                    if j != drag.index && j < self.tabs.len() {
+                    if j != drag.index && j < self.tabs.len() && drag.index < self.tabs.len() {
                         let tab = self.tabs.remove(drag.index);
                         self.tabs.insert(j, tab);
                         self.active_tab = j;
@@ -3478,6 +3650,12 @@ impl Session {
     fn menu_key(&mut self, event: &KeyEvent) {
         let Some(m) = self.menu.as_mut() else { return };
         let n = m.items.len();
+        if n == 0 {
+            // nothing to pick (an empty list): any key closes it
+            self.menu = None;
+            self.window.request_redraw();
+            return;
+        }
         match &event.logical_key {
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
                 m.selected = Some(m.selected.map_or(0, |i| (i + 1) % n));
@@ -3667,6 +3845,10 @@ impl Session {
         }
         let title = self.panes[&id].title();
         for (action, text) in todo {
+            // an earlier trigger's callback may have closed the window
+            if self.quit || self.tabs.is_empty() {
+                return;
+            }
             match action {
                 TriggerAction::Notify(t) => self.notify(&t, &format!("{text} — {title}")),
                 TriggerAction::Toast => self.toast(text, 3.0),
@@ -3741,16 +3923,7 @@ impl Session {
         let label = std::path::Path::new(&file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
         match self.spawn_command(&label, cmd) {
             Ok(id) => match ed.open_in {
-                OpenIn::Popup => {
-                    let old = self.tabs[self.active_tab].float.replace(id);
-                    self.tabs[self.active_tab].float_shown = true;
-                    if let Some(old) = old {
-                        if let Some(p) = self.panes.remove(&old) {
-                            p.kill();
-                        }
-                    }
-                    self.after_focus_change();
-                }
+                OpenIn::Popup => self.show_popup(id),
                 OpenIn::Tab => {
                     self.tabs.push(Tab::new(id));
                     self.active_tab = self.tabs.len() - 1;
@@ -4331,7 +4504,8 @@ impl Session {
                     p.write(b"\r");
                 }
             }
-            ConfirmAct::CloseTab(i) => self.close_tab(i),
+            ConfirmAct::CloseTab(key) => self.close_tabs(&[key]),
+            ConfirmAct::CloseTabs(keys) => self.close_tabs(&keys),
             ConfirmAct::ClosePane(id) => self.close_pane(id),
             ConfirmAct::CloseWindow => self.close_window(),
             ConfirmAct::UpdateEditors(found) => {
@@ -4371,15 +4545,34 @@ impl Session {
                 row[cut..].to_string()
             }
         };
-        let typed = line.trim();
-        if typed.is_empty() {
-            return false;
-        }
-        let mut why: Vec<String> = if self.config.confirm_risky {
-            self.config.confirm_commands.iter().filter(|(_, re)| re.is_match(typed)).map(|(w, _)| format!("It {w}.")).collect()
-        } else {
-            Vec::new()
+        // A second opinion: the line as Vibex sent it. The screen can be
+        // unreadable for a moment (the console host paints the end of a big
+        // output over the prompt after the shell is already back at it).
+        let sent = p.typed_line().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let risky = |t: &str| -> Vec<String> {
+            if !self.config.confirm_risky {
+                return Vec::new();
+            }
+            self.config.confirm_commands.iter().filter(|(_, re)| re.is_match(t)).map(|(w, _)| format!("It {w}.")).collect()
         };
+        let mut typed = line.trim().to_string();
+        let mut why = risky(&typed);
+        if why.is_empty() {
+            if let Some(s) = sent.as_deref() {
+                let w = risky(s);
+                if !w.is_empty() {
+                    typed = s.to_string();
+                    why = w;
+                }
+            }
+        }
+        if typed.is_empty() {
+            match sent {
+                Some(s) => typed = s,
+                None => return false,
+            }
+        }
+        let typed = typed.as_str();
         if let Some(e) = self.eng.as_ref().filter(|e| self.config.scope_guard && !e.scope.is_empty()) {
             let out: Vec<String> = engagement::targets(typed).into_iter().filter(|t| !e.scope.allows(t)).map(|t| t.to_string()).collect();
             if !out.is_empty() {
@@ -4739,7 +4932,7 @@ impl Session {
     }
 
     fn emit(&mut self, event: &str, arg: EventArg) {
-        if !self.engine.has_handler(event) {
+        if !self.engine.has_handler(event) || self.quit || self.tabs.is_empty() {
             return;
         }
         match self.engine.emit(event, self.snapshot(), arg) {
@@ -4750,6 +4943,10 @@ impl Session {
 
     fn apply_cmds(&mut self, cmds: Vec<Cmd>) {
         for cmd in cmds {
+            // an earlier command may have closed the last tab
+            if self.quit || self.tabs.is_empty() {
+                return;
+            }
             match cmd {
                 Cmd::SendText(s) => self.write_active(s.as_bytes()),
                 Cmd::CopyText(s) => {
@@ -4805,6 +5002,10 @@ impl Session {
     }
 
     fn perform(&mut self, action: Action) {
+        // the window is closing (Lua or a CLI call closed its last tab)
+        if self.quit || self.tabs.is_empty() {
+            return;
+        }
         let page = self.active().term.rows().saturating_sub(1).max(1) as isize;
         match action {
             Action::Copy => {
@@ -4879,7 +5080,8 @@ impl Session {
             }
             Action::ActivateTab(i) => {
                 let last = self.tabs.len() - 1;
-                self.activate_tab(if i >= 9 { last } else { (i - 1).min(last) });
+                // ActivateTab:0 from a binding means the first tab
+                self.activate_tab(if i >= 9 { last } else { i.saturating_sub(1).min(last) });
             }
             Action::SplitRight(p) => self.split(SplitDir::Horizontal, p.as_deref()),
             Action::SplitDown(p) => self.split(SplitDir::Vertical, p.as_deref()),
@@ -4916,7 +5118,7 @@ impl Session {
             }
             Action::RenameTab => {
                 let current = self.tabs[self.active_tab].title.clone().unwrap_or_else(|| self.active().title());
-                self.rename = Some((self.active_tab, current));
+                self.rename = Some((self.tabs[self.active_tab].key, current));
                 self.relayout_tabbar();
             }
             Action::TabColor(c) => {
@@ -5190,15 +5392,7 @@ impl Session {
             return false;
         }
         let Some(rest) = self.suggestion() else { return false };
-        let take = if whole {
-            rest
-        } else {
-            // up to and including the next word's end
-            let trimmed = rest.trim_start();
-            let lead = rest.len() - trimmed.len();
-            let end = trimmed.find(|c: char| c.is_whitespace() || "/\\".contains(c)).map_or(trimmed.len(), |i| i + 1);
-            rest[..lead + end].to_string()
-        };
+        let take = if whole { rest } else { rest[..next_word_end(&rest)].to_string() };
         self.active_mut().selection = None;
         self.write_active(take.as_bytes());
         self.window.request_redraw();
@@ -5369,9 +5563,10 @@ impl Session {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => self.rename = None,
             Key::Named(NamedKey::Enter) => {
-                let (i, text) = (*i, text.trim().to_string());
+                let (key, text) = (*i, text.trim().to_string());
                 self.rename = None;
-                if let Some(t) = self.tabs.get_mut(i) {
+                // the tab it was for (gone: nothing to rename)
+                if let Some(t) = self.tabs.iter_mut().find(|t| t.key == key) {
                     // an empty name goes back to following the shell's title
                     t.title = (!text.is_empty()).then_some(text);
                 }
@@ -5606,6 +5801,9 @@ impl Session {
 
     fn refresh_status(&mut self) {
         self.next_status = Instant::now() + Duration::from_secs(1);
+        if self.quit || self.tabs.is_empty() {
+            return;
+        }
         if !self.config.status_bar {
             self.status = None;
             return;
@@ -5631,6 +5829,9 @@ impl Session {
 
     /// Timers: status bar, config hot-reload, leader timeout, toast expiry.
     fn tick(&mut self) -> Option<Instant> {
+        if self.quit || self.tabs.is_empty() {
+            return None;
+        }
         let now = Instant::now();
         let mut next: Option<Instant> = None;
         let mut at = |t: Instant| next = Some(next.map_or(t, |n: Instant| n.min(t)));
@@ -5642,6 +5843,10 @@ impl Session {
             at(self.next_status);
         } else if self.status.is_some() {
             self.status = None;
+        }
+        // the status handler's commands may have closed the window
+        if self.quit || self.tabs.is_empty() {
+            return None;
         }
         // replays: feed what's due, wake for the next chunk
         let mut replayed = false;
@@ -5963,8 +6168,21 @@ impl Session {
             }
             Ime::Commit(text) => {
                 self.preedit = None;
-                if text.is_empty() {
+                if text.is_empty() || self.tabs.is_empty() {
                     return;
+                }
+                // as key() does: a question or a menu takes the keyboard
+                // (a completions popup closes and the text goes on)
+                if self.confirm.is_some() {
+                    return;
+                }
+                if let Some(m) = &self.menu {
+                    let typing = m.typing;
+                    self.menu = None;
+                    self.window.request_redraw();
+                    if !typing {
+                        return;
+                    }
                 }
                 if let Some((_, name)) = self.rename.as_mut() {
                     name.push_str(&text);
@@ -5987,7 +6205,8 @@ impl Session {
                     if let Some(n) = self.active_mut().notes.as_mut() {
                         n.insert(&text);
                     }
-                } else if self.quick.is_none() && !self.active().held {
+                } else if self.quick.is_none() && !self.active().held && self.active().copy.is_none() {
+                    // (copy mode keeps the keyboard, so not into the shell)
                     self.active_mut().selection = None;
                     self.write_active(text.as_bytes());
                 }
@@ -5999,6 +6218,9 @@ impl Session {
     }
 
     fn tick_blink(&mut self) -> Option<Instant> {
+        if self.quit || self.tabs.is_empty() {
+            return None;
+        }
         let modes = &self.active().term.modes;
         let blinking = self.focused && modes.cursor_blink && modes.show_cursor;
         if !blinking {
@@ -6018,7 +6240,10 @@ impl Session {
     }
 
     fn animating(&self) -> bool {
-        self.visible_panes().iter().any(|id| self.panes[id].scroll_px != 0.0)
+        if self.quit || self.tabs.is_empty() {
+            return false;
+        }
+        self.visible_panes().iter().any(|id| self.panes.get(id).is_some_and(|p| p.scroll_px != 0.0))
     }
 }
 
@@ -6032,8 +6257,22 @@ impl ApplicationHandler<AppEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, ev: AppEvent) {
         match ev {
             AppEvent::Pty => {
+                use std::sync::atomic::Ordering::SeqCst;
+                let seq = PTY_SEQ.load(SeqCst);
+                let mut more = false;
                 for s in self.sessions.values_mut() {
-                    s.drain_all();
+                    more |= s.drain_all();
+                }
+                if more {
+                    // the rest after input and redraws: about_to_wait posts
+                    // the next one (PTY_WAKE stays set, so readers don't)
+                    self.pty_more = true;
+                } else {
+                    PTY_WAKE.store(false, SeqCst);
+                    // output that came in after its reader saw the flag set
+                    if PTY_SEQ.load(SeqCst) != seq && !PTY_WAKE.swap(true, SeqCst) {
+                        let _ = self.proxy.send_event(AppEvent::Pty);
+                    }
                 }
             }
             AppEvent::Open(req) => {
@@ -6095,6 +6334,11 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.settle(el);
+        // output left over from a budgeted drain: input and redraws have
+        // had their turn, carry on
+        if std::mem::take(&mut self.pty_more) {
+            let _ = self.proxy.send_event(AppEvent::Pty);
+        }
         let mut wake: Option<Instant> = None;
         let mut earliest = |t: Instant| wake = Some(wake.map_or(t, |w: Instant| w.min(t)));
         for s in self.sessions.values_mut() {
@@ -6510,7 +6754,7 @@ fn run_icons(args: Vec<String>) -> i32 {
     match cmd.as_str() {
         "list" => {
             for (n, _) in icons::ICONS {
-                println!("{n}");
+                outln!("{n}");
             }
             0
         }
@@ -6523,7 +6767,7 @@ fn run_icons(args: Vec<String>) -> i32 {
             let (px, w, h) = icons::sheet(size, 9, ink, paper);
             match vibex_render::write_bmp(std::path::Path::new(&out), &px, w, h) {
                 Ok(()) => {
-                    println!("wrote {out} ({} icons at {size}px)", icons::ICONS.len());
+                    outln!("wrote {out} ({} icons at {size}px)", icons::ICONS.len());
                     0
                 }
                 Err(e) => {
@@ -6543,7 +6787,7 @@ fn run_icons(args: Vec<String>) -> i32 {
                     let _ = std::fs::write(dir.join(format!("{n}.svg")), svg);
                 }
             }
-            println!("wrote {} SVGs to {}", icons::ICONS.len(), dir.display());
+            outln!("wrote {} SVGs to {}", icons::ICONS.len(), dir.display());
             0
         }
         _ => {
@@ -6589,18 +6833,18 @@ fn run_editors(args: Vec<String>) -> i32 {
         None | Some("list") => {
             for p in &pins {
                 if p.name == "nvim" || p.name == "nano" {
-                    println!("{:<6} {}", if p.name == "nvim" { "Neovim" } else { "nano" }, p.version);
+                    outln!("{:<6} {}", if p.name == "nvim" { "Neovim" } else { "nano" }, p.version);
                 }
             }
-            println!("in {}", dir.display());
+            outln!("in {}", dir.display());
             0
         }
         Some(c @ ("check" | "update")) => match bundle::check() {
             bundle::Msg::Available(f) if c == "update" => {
-                println!("updating: {}", f.describe());
+                outln!("updating: {}", f.describe());
                 match bundle::apply(&f) {
                     bundle::Msg::Done(t) => {
-                        println!("{t}");
+                        outln!("{t}");
                         0
                     }
                     bundle::Msg::Failed(e) | bundle::Msg::UpToDate(e) => {
@@ -6611,11 +6855,11 @@ fn run_editors(args: Vec<String>) -> i32 {
                 }
             }
             bundle::Msg::Available(f) => {
-                println!("new: {}\nrun `vibex editors update` (or palette \u{2192} Update nano and Neovim)", f.describe());
+                outln!("new: {}\nrun `vibex editors update` (or palette \u{2192} Update nano and Neovim)", f.describe());
                 0
             }
             bundle::Msg::UpToDate(t) | bundle::Msg::Done(t) => {
-                println!("{t}");
+                outln!("{t}");
                 0
             }
             bundle::Msg::Failed(e) => {
@@ -6655,11 +6899,11 @@ fn run_audit(args: Vec<String>) -> i32 {
     match cmd.as_str() {
         "verify" => match audit::verify(&file) {
             Ok(audit::Verdict::Intact { entries, first, last }) => {
-                println!("intact: {}, {} to {}", audit::entries(entries), audit::iso(first), audit::iso(last));
+                outln!("intact: {}, {} to {}", audit::entries(entries), audit::iso(first), audit::iso(last));
                 0
             }
             Ok(audit::Verdict::Broken { line, reason, good }) => {
-                println!("BROKEN at line {line}: {reason}\n{} before it intact; nothing from line {line} on can be trusted", audit::entries(good));
+                outln!("BROKEN at line {line}: {reason}\n{} before it intact; nothing from line {line} on can be trusted", audit::entries(good));
                 1
             }
             Err(e) => {
@@ -6678,7 +6922,7 @@ fn run_audit(args: Vec<String>) -> i32 {
             let out = out.unwrap_or_else(|| file.with_extension("html"));
             match std::fs::write(&out, audit::report(&text, since)) {
                 Ok(()) => {
-                    println!("wrote {}", out.display());
+                    outln!("wrote {}", out.display());
                     if open {
                         open_path(&out);
                     }
@@ -6715,7 +6959,7 @@ fn run_cast2gif(args: Vec<String>) -> i32 {
             "--idle" => idle = num(it.next()).unwrap_or(idle).max(0.1),
             "--open" => open = true,
             "-h" | "--help" => {
-                println!("{CAST2GIF_USAGE}");
+                outln!("{CAST2GIF_USAGE}");
                 return 0;
             }
             _ => files.push(PathBuf::from(a)),
@@ -6735,7 +6979,7 @@ fn run_cast2gif(args: Vec<String>) -> i32 {
     };
     match cast_to_gif(&input, &output, &cfg, fps, speed, idle) {
         Ok((frames, secs)) => {
-            println!("wrote {} ({frames} frames, {secs:.1}s)", output.display());
+            outln!("wrote {} ({frames} frames, {secs:.1}s)", output.display());
             if open {
                 open_path(&output);
             }
@@ -6871,6 +7115,84 @@ fn version() -> String {
     }
 }
 
+/// How much of crash.log is kept (the newest part).
+const CRASH_LOG_MAX: usize = 200 * 1024;
+
+/// One crash.log entry.
+fn crash_entry(when: u64, version: &str, message: &str, location: &str, backtrace: &str) -> String {
+    format!("=== {} {version}\npanicked at {location}:\n{message}\n{backtrace}\n\n", audit::iso(when))
+}
+
+/// Add `entry` to the log at `path`, keeping it under `max` bytes (whole
+/// entries from the end).
+fn append_crash(path: &std::path::Path, entry: &str, max: usize) -> std::io::Result<()> {
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let mut text = std::fs::read(path).unwrap_or_default();
+    text.extend_from_slice(entry.as_bytes());
+    if text.len() > max {
+        let cut = text.len() - max;
+        // start at the first entry that's wholly inside the kept part
+        let from = text[cut..].windows(4).position(|w| w == b"=== ").map_or(cut, |i| cut + i);
+        text.drain(..from);
+    }
+    std::fs::write(path, text)
+}
+
+/// Before the usual panic message: write what happened (and where) to
+/// `<config dir>/crash.log`, since a GUI app's stderr usually goes nowhere.
+fn install_crash_log() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(path) = config::config_dir().map(|d| d.join("crash.log")) {
+            let message = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "(no message)".into());
+            let location = info.location().map_or("an unknown place".into(), |l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
+            let thread = std::thread::current().name().map(|n| format!(" (thread '{n}')")).unwrap_or_default();
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let _ = append_crash(&path, &crash_entry(history::now(), &version(), &message, &format!("{location}{thread}"), &bt), CRASH_LOG_MAX);
+        }
+        default(info);
+    }));
+}
+
+#[cfg(test)]
+mod console_tests {
+    #[test]
+    fn only_printing_commands_borrow_the_console() {
+        let v = |a: &[&str]| super::prints_to_console(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(v(&["cli", "list"]) && v(&["show", "x.png"]) && v(&["--version"]) && v(&["--check-config"]));
+        assert!(!v(&[]) && !v(&["--cwd", "."]) && !v(&["--profile", "wsl"]) && !v(&["--", "nvim", "x"]));
+        // a program after `--` named like a command isn't one
+        assert!(!v(&["--cwd", ".", "--", "cli"]));
+    }
+}
+
+#[cfg(test)]
+mod crash_tests {
+    #[test]
+    fn crash_log_keeps_the_newest_entries() {
+        let dir = std::env::temp_dir().join(format!("vibex-crash-test-{}", std::process::id()));
+        let path = dir.join("sub").join("crash.log");
+        let _ = std::fs::remove_dir_all(&dir);
+        for i in 0..50 {
+            let e = super::crash_entry(1_700_000_000 + i, "vibex 9.9", &format!("boom {i}"), "src/main.rs:1:1", &"frame\n".repeat(50));
+            super::append_crash(&path, &e, 4096).unwrap();
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.len() <= 4096, "{}", text.len());
+        assert!(text.starts_with("=== "), "cut at an entry");
+        assert!(text.contains("boom 49") && !text.contains("boom 0\n"));
+        assert!(text.contains("2023-11-14") && text.contains("vibex 9.9") && text.contains("panicked at src/main.rs:1:1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Release builds are GUI-subsystem (no console window). When started with
 /// command-line options from a terminal, borrow that terminal's console so
 /// `--help`, `--version` and `--check-config` can print.
@@ -6882,8 +7204,19 @@ fn attach_parent_console() {
     }
 }
 
+/// Arguments that print to the console (and then exit). Only these borrow
+/// the parent's console: a window started with `vibex --cwd .` from a
+/// shell must not stay tied to it (it would get that console's Ctrl+C and
+/// be closed with it).
+fn prints_to_console(args: &[String]) -> bool {
+    let commands = ["cli", "icons", "show", "audit", "cast2gif", "editors"];
+    let flags = ["--help", "-h", "--version", "-V", "--check-config", "--preview"];
+    args.first().is_some_and(|a| commands.contains(&a.as_str())) || args.iter().any(|a| flags.contains(&a.as_str()))
+}
+
 fn main() {
-    if std::env::args().len() > 1 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if prints_to_console(&args) {
         attach_parent_console();
     }
     if std::env::args().nth(1).as_deref() == Some("cli") {
@@ -6904,6 +7237,8 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("editors") {
         std::process::exit(run_editors(std::env::args().skip(2).collect()));
     }
+    // the GUI from here on
+    install_crash_log();
     let mut profile: Option<String> = None;
     let mut cwd: Option<String> = None;
     let mut exec: Option<Vec<String>> = None;
@@ -6948,11 +7283,11 @@ fn main() {
                 break;
             }
             "--version" | "-V" => {
-                println!("{}", version());
+                outln!("{}", version());
                 return;
             }
             "--help" | "-h" => {
-                println!("{USAGE}");
+                outln!("{USAGE}");
                 return;
             }
             other => {
@@ -6985,7 +7320,7 @@ fn main() {
         match &error {
             None => {
                 let names: Vec<_> = config.profiles.iter().map(|p| p.name.as_str()).collect();
-                println!(
+                outln!(
                     "config ok: {} ({} bindings, profiles: {}, default: {})",
                     config_path.as_ref().map_or("<defaults>".into(), |p| p.display().to_string()),
                     config.bindings.len(),
@@ -7016,7 +7351,7 @@ fn main() {
             std::process::exit(1);
         }
         match render_preview(&out, &config, &engine, &profile, preview_palette, preview_quick) {
-            Ok(()) => println!("wrote {}", out.display()),
+            Ok(()) => outln!("wrote {}", out.display()),
             Err(e) => {
                 eprintln!("preview failed: {e}");
                 std::process::exit(1);
@@ -7096,7 +7431,7 @@ fn main() {
             }
         }
     }
-    let mut app = App { proxy, startup: Some(startup), sessions: HashMap::new(), notice };
+    let mut app = App { proxy, startup: Some(startup), sessions: HashMap::new(), notice, pty_more: false };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("vibex: {e}");
     }
