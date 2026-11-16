@@ -72,11 +72,16 @@ nano notes.txt                   # nano and Neovim come bundled
 ### Terminal
 - **Own engine:** a DEC/ANSI parser, screen and scrollback with reflow, alternate screen, scroll regions, and xterm modifier keys.
 - **Rendering:** wgpu (DirectX 12 / Vulkan) with a CPU fallback and a hand-written glyph rasteriser. It supports ligatures, COLR v0/v1 colour emoji, and full grapheme clusters (ZWJ families, flags, skin tones).
-- **Two styles, one click apart** (Settings → Appearance → Style, or `vibex cli style vibex|dragon`):
+- **Seven styles, one click apart** (Settings → Appearance → Style, or `vibex cli style NAME`). Each sets the colours, prompt, title bar, font, cursor and spacing of a terminal you know:
   - *Vibex*: a frameless window with its own tab bar, rounded corners, and acrylic or glass transparency.
-  - *Dragon (Kali Linux)*: Kali's colours (Dragon Dark), its two-line `┌──(user㉿host)-[~]` prompt, its coloured `ls`, and a classic title bar with a menu bar, all taken from Kali's own configuration. See [The Kali Linux look](docs/CONFIG.md#the-kali-linux-look).
-  - Switching back to *Vibex* takes every Dragon setting off again, and each piece (theme, prompt, title bar) can also be set on its own in `vibex.lua`.
-- **54 built-in themes**, light and dark: Catppuccin, Dracula, Nord, One Dark, Monokai, Gruvbox, Solarized, Tokyo Night, Rosé Pine, Kanagawa and more, or your own colours. Smooth scrolling throughout.
+  - *Dragon (Kali Linux)*: Kali's colours, its two-line `┌──(user㉿host)-[~]` prompt and coloured `ls`, and QTerminal's title and menu bar, from Kali's own configuration.
+  - *Windows Command Prompt*: Campbell colours, `C:\Users\you>`, Consolas, the console's underline cursor and title bar.
+  - *Windows PowerShell*: the same console in Windows PowerShell's blue.
+  - *GNOME Terminal (Ubuntu)*: Tango colours on Ubuntu's aubergine, the green and blue `you@host:~$`, and GNOME's header bar.
+  - *macOS Terminal*: the Basic profile's black on white, `you@host dir %`, and the traffic lights.
+  - *tmux*: tmux's green status line (session, windows, title and clock) on xterm's colours.
+  - Switching back to *Vibex* takes every style setting off again, and each piece (theme, prompt, title bar, status line) can also be set on its own. See [Styles](docs/CONFIG.md#styles).
+- **58 built-in themes**, light and dark: Catppuccin, Dracula, Nord, One Dark, Monokai, Gruvbox, Solarized, Tokyo Night, Rosé Pine, Kanagawa, Ubuntu, Campbell and more, or your own colours. Text stays readable in all of them. Smooth scrolling throughout.
 - **Inline images:** sixel and the kitty graphics protocol. `vshow` draws PNG and JPEG pictures and rendered Markdown right in the terminal, with `--width`, `--height`, `--fit`, `--scale 50%`, `--center` and more. An image taller than the window is shrunk to fit, and the prompt always comes back below it.
 - **Modern protocols:** OSC 8 hyperlinks, OSC 52 clipboard, OSC 9/777 notifications, the kitty keyboard protocol, IME input, and Ctrl+click on URLs and `path:line`.
 - **Accessibility:** screen readers through UI Automation.

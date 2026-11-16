@@ -24,14 +24,15 @@ Unknown options and unknown fields are errors, so typos are caught
 | `theme` | a built-in theme by id or name (`"catppuccin-mocha"` or `"Catppuccin Mocha"`; the list is below), or a table (below) | `"tokyo-night"` |
 | `window` | `{ width, height, padding, opacity, renderer }` | `1100×680`, padding `{x=10,y=8}`, opacity `0.4` (acrylic, same darkness as Windows Terminal's 40%), `"auto"` |
 | `opacity` / `padding` | shortcuts for the `window` fields | |
-| `title_bar` | `"tabs"`: tabs in the title bar, like Windows Terminal. `"classic"`: a centred title, round window buttons and a menu bar (Session, Actions, Edit, View, Help), with tabs below only when there's more than one, like QTerminal on Kali Linux. Also Settings → Appearance | `"tabs"` |
-| `prompt` | `"default"`: the shell's own prompt. `"dragon"`: Kali Linux's two-line `┌──(user㉿host)-[~]` / `└─$` prompt in PowerShell and bash (WSL), with Kali's `ls` (columns, colours, sorting). Also Settings → Terminal | `"default"` |
+| `title_bar` | `"tabs"`: tabs in the title bar, like Windows Terminal. The others are a title row, with tabs below only when there's more than one: `"classic"` (QTerminal on Kali: centred title, round buttons, a Session · Actions · Edit · View · Help menu bar), `"windows"` (the Windows console: icon and title on the left, square buttons), `"gnome"` (GNOME Terminal's header bar), `"macos"` (traffic lights, centred title), `"tmux"` (a plain bar; the windows are in the status line). Also Settings → Appearance | `"tabs"` |
+| `prompt` | `"default"`: the shell's own prompt. `"dragon"`: Kali Linux's two-line `┌──(user㉿host)-[~]` / `└─$` prompt, with Kali's `ls` (columns, colours, sorting). `"cmd"`: the Windows command prompt's `C:\path>`. `"ubuntu"`: Ubuntu's bold green and blue `user@host:~$`. `"macos"`: `user@host dir %`. In PowerShell and bash (WSL); new tabs. Also Settings → Terminal | `"default"` |
 | `right_click` | `"menu"`: right-click opens a menu (link actions, copy / paste / select all / find, splits, tabs, the last command, Settings) with each shortcut shown; Shift+right-click works inside mouse apps like vim. `"paste"`: Windows Terminal's copy-if-selected-else-paste | `"menu"` |
 | `glass` | glass look: the desktop shows through blurred and in colour (Windows' acrylic blur-behind, no grey layer), smoky title and status bars, a faint sheen and light edge; stays see-through when the window isn't focused. Also Settings → Appearance → Glass | `false` |
 | `cursor` | `{ style = "block"\|"bar"\|"underline", blink, blink_ms }` | block, blinking, 530 ms |
 | `scrollback` | lines | `10000` |
 | `scroll` | `{ wheel_lines, smooth }` | `3`, `true` |
 | `status_bar` | bool | `false` |
+| `status_style` | `"vibex"`, or `"tmux"`: tmux's green line, `[0] 0:pwsh* 1:bash-` on the left and `"title" 14:05 14-Nov-26` on the right. Also Settings → Appearance | `"vibex"` |
 | `multi_click_ms` | double/triple-click window | `400` |
 | `profiles` | `{ name = { cmd, cwd, env } }` | `powershell`, `cmd`, `wsl` |
 | `default_profile` | profile name | `"powershell"` |
@@ -72,8 +73,26 @@ config.theme = {
   ansi    = { "#1d1c24", "#e5534b", "#57ab5a", "#e0a84a", "#539bf5", "#b083f0", "#39c5cf", "#cdd0d6" },
   brights = { "#545d68", "#ff7b72", "#7ee787", "#f6c15b", "#79c0ff", "#d2a8ff", "#56d4dd", "#f0f3f6" },
   bold_is_bright = true,
+  readable = true,        -- see "Readable colours" below
 }
 ```
+
+**Readable colours.** Every theme's colours are drawn as the scheme defines
+them, with three corrections so text never disappears (like Windows Terminal's
+*adjust indistinguishable colors*):
+
+- an ANSI colour too close to the background (Solarized Dark's bright black is
+  its background colour; white on most light themes) is nudged until it reads
+- a selection colour that would hide the text (schemes often mean it as a
+  see-through overlay) is mixed into the background, keeping its hue, and any
+  text inside a selection stays readable
+- a cursor that would vanish into the background is moved toward the text
+  colour, and the character under it uses whichever colour reads best
+
+The scheme's palette itself is never changed, and colours a program sets
+exactly (24-bit) are left alone outside a selection. To get every colour
+exactly as given, readable or not: `config.readable_colors = false` (or
+`readable = false` in a theme table).
 
 **Profiles.** `cmd` is a list (`{ "wsl.exe", "-d", "Ubuntu" }`) or a string split
 on spaces (`"ssh me@box"`). `cwd` accepts `~`. `env` adds variables.
@@ -413,6 +432,34 @@ Image size (the aspect is always kept):
 | `--center` | centred (default: left) |
 
 With no flag it shows at its own size, shrunk to the window's width when wider.
+
+## Styles
+
+A style sets a whole look at once: colours, prompt, title bar, font, size,
+padding, cursor, status line, and (for Vibex and Dragon) transparency. Pick
+one in Settings → Appearance → Style, in the command palette ("style …"), or
+with `vibex cli style NAME`:
+
+| Style | `NAME` | What it sets |
+|---|---|---|
+| Vibex | `vibex` | nothing: everything comes from vibex.lua again |
+| Dragon (Kali Linux) | `dragon` | see [The Kali Linux look](#the-kali-linux-look) |
+| Windows Command Prompt | `cmd` | Campbell colours, the `C:\path>` prompt, the Windows title bar, Consolas 12, an underline cursor, no margin |
+| Windows PowerShell | `powershell` | Campbell PowerShell (the blue), PowerShell's own prompt, the Windows title bar, Consolas 12, an underline cursor |
+| GNOME Terminal (Ubuntu) | `gnome` | Ubuntu (Tango on aubergine), the `user@host:~$` prompt, GNOME's header bar, Ubuntu Mono 13, a block cursor |
+| macOS Terminal | `macos` | Terminal Basic (black on white), the `user@host dir %` prompt, the macOS title bar, Menlo 11, a block cursor |
+| tmux | `tmux` | xterm's colours, the shell's prompt, a plain title bar, tmux's green status line; your font |
+
+- A style only sets what it lists; switching to another, or back to Vibex,
+  takes every one of them off first, so nothing of the last look stays.
+  Changing any of those settings afterwards makes the style "Custom".
+- The prompt is set when a shell starts: tabs already open keep theirs, new
+  tabs get the style's.
+- Ubuntu Mono and Menlo don't come with Windows. Without them the style
+  uses your font (and says so); put the font's `.ttf` files in
+  `%USERPROFILE%\.config\vibex\fonts\` or install them for Windows.
+- Each piece can also be set on its own in vibex.lua: `config.theme`,
+  `config.prompt`, `config.title_bar`, `config.status_style` and so on.
 
 ## The Kali Linux look
 

@@ -68,6 +68,59 @@ if ($env:VIBEX_PROMPT -eq 'dragon') {
     }
     $function:prompt = $function:__VibexDragonPrompt
 }
+
+# config.prompt = "cmd": the Windows command prompt's C:\path> (and its
+# window title); "ubuntu": Ubuntu's bash prompt, user@host:~$ in bold green
+# and blue; "macos": the macOS zsh prompt, user@host dir %.
+if ($env:VIBEX_PROMPT -in 'cmd', 'ubuntu', 'macos') {
+    if (-not $global:__VibexHostName) {
+        $global:__VibexHostName = if ($env:VIBEX_HOSTNAME) { $env:VIBEX_HOSTNAME } else { [System.Net.Dns]::GetHostName() }
+    }
+    function global:__VibexLookPath([bool]$tilde) {
+        $loc = $executionContext.SessionState.Path.CurrentLocation
+        $path = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { $loc.Path }
+        if (-not $tilde) { return $path }
+        $home_ = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath('UserProfile') }
+        if ($path -eq $home_) { return '~' }
+        if ($path.StartsWith($home_ + '\', [StringComparison]::OrdinalIgnoreCase)) { return '~' + $path.Substring($home_.Length) }
+        $path
+    }
+    function global:__VibexLookPrompt {
+        $e = [char]27
+        $bel = [char]7
+        $user = $env:USERNAME
+        $hn = $global:__VibexHostName
+        switch ($env:VIBEX_PROMPT) {
+            'cmd' {
+                $text = "$(__VibexLookPath $false)>"
+                # a prompt that ends exactly at the window's edge leaves the
+                # cursor on the last column, and PSReadLine then misplaces
+                # the end of it by one: a space moves it past the edge
+                $w = try { $Host.UI.RawUI.WindowSize.Width } catch { 0 }
+                if ($w -gt 0 -and $text.Length % $w -eq 0) { $text += ' ' }
+                "$e]0;Command Prompt$bel$text"
+            }
+            'ubuntu' {
+                $path = __VibexLookPath $true
+                "$e]0;$user@${hn}: $path$bel$e[01;32m$user@$hn$e[00m:$e[01;34m$path$e[00m$ "
+            }
+            default {
+                # macOS: the folder's own name, ~ at home
+                $path = __VibexLookPath $true
+                $leaf = if ($path -eq '~') { '~' } else { [IO.Path]::GetFileName($path.TrimEnd('\')) }
+                if (-not $leaf) { $leaf = $path }
+                "$e]0;$user@${hn}: $path$bel$user@$hn $leaf % "
+            }
+        }
+    }
+    $function:prompt = $function:__VibexLookPrompt
+    # PSReadLine repaints the end of the prompt (red after an error) and
+    # expects it to be "> "; cmd's has no space, so tell it, or the ">"
+    # is drawn over.
+    if ($env:VIBEX_PROMPT -eq 'cmd' -and (Get-Command Set-PSReadLineOption -ErrorAction Ignore)) {
+        try { Set-PSReadLineOption -PromptText '>' } catch { }
+    }
+}
 $global:__VibexOriginalPrompt = $function:prompt
 
 function global:prompt {

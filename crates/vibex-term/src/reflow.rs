@@ -27,6 +27,16 @@ impl Terminal {
         let mut fence_logical: Option<usize> = None;
         // every line number changes
         self.epoch += 1;
+        // ConPTY's copy of the screen has no history, so for it the top
+        // row starts a line: break the line there too, and keep that row on
+        // top afterwards (see `conpty_layout`)
+        let old_top = self.scrollback.len();
+        if self.conpty_layout {
+            if let Some(last) = self.scrollback.back_mut() {
+                last.wrapped = false;
+            }
+        }
+        let mut top_logical: Option<usize> = None;
         let all: Vec<Row> = self.scrollback.drain(..).chain(self.primary.drain(..)).collect();
         let n = all.len();
 
@@ -46,6 +56,9 @@ impl Terminal {
             if Some(i) == fence_row && fence_logical.is_none() {
                 // inside a wrapped line: the fence goes after that line
                 fence_logical = Some(logical.len() + usize::from(!buf.is_empty()));
+            }
+            if i == old_top && buf.is_empty() {
+                top_logical = Some(logical.len());
             }
             if line_mark.is_none() {
                 line_mark = row.prompt;
@@ -93,10 +106,14 @@ impl Terminal {
         let mut pending = false;
         let mut new_input: Option<(usize, usize)> = None; // (row in `out`, column)
         let mut fence_out: Option<usize> = None;
+        let mut top_out: Option<usize> = None;
         for (li, cells) in logical.iter().enumerate() {
             let cursor_off = cursor_at.filter(|c| c.0 == li).map(|c| c.1);
             let input_off = input_at.filter(|c| c.0 == li).map(|c| c.1);
             let first_row = out.len();
+            if Some(li) == top_logical {
+                top_out = Some(first_row);
+            }
             if Some(li) == fence_logical {
                 fence_out = Some(first_row);
             }
@@ -159,13 +176,27 @@ impl Terminal {
         while out.len() > new_cursor.1 + 1 && out.last().is_some_and(|r| !r.wrapped && r.images.is_empty() && r.cells.iter().all(is_blank)) {
             out.pop();
         }
-        while out.len() < rows {
-            out.push(Row::new(cols, Cell::default()));
-        }
-        let mut start = out.len() - rows;
-        if new_cursor.1 < start {
-            start = new_cursor.1;
+        let mut start;
+        if self.conpty_layout {
+            // the old top row stays on top; blank rows fill in below, and
+            // only a cursor pushed past the bottom scrolls lines away
+            start = top_out.unwrap_or(0).min(new_cursor.1);
+            if new_cursor.1 >= start + rows {
+                start = new_cursor.1 + 1 - rows;
+            }
+            while out.len() < start + rows {
+                out.push(Row::new(cols, Cell::default()));
+            }
             out.truncate(start + rows);
+        } else {
+            while out.len() < rows {
+                out.push(Row::new(cols, Cell::default()));
+            }
+            start = out.len() - rows;
+            if new_cursor.1 < start {
+                start = new_cursor.1;
+                out.truncate(start + rows);
+            }
         }
         // never show restored history on screen: the screen starts at the
         // fence at the earliest

@@ -664,8 +664,96 @@ fn altgr_text(event: &KeyEvent) -> bool {
     event.text.as_ref().is_some_and(|t| !t.is_empty() && t.chars().all(|c| !c.is_control()))
 }
 
+/// What switching to a style says: its name, whether its font is missing
+/// (and where to get it), and that tabs already open keep their prompt.
+fn style_notice(name: &str) -> String {
+    let label = settings_ui::STYLE_NAMES.iter().find(|(_, n)| *n == name).map_or(name, |(l, _)| l);
+    if name == "vibex" {
+        return "style: Vibex (back to vibex.lua)".into();
+    }
+    let font = settings::STYLES.iter().find(|(n, _)| *n == name).and_then(|(_, vals)| {
+        vals.iter().find(|(k, _)| *k == "font_family").and_then(|(_, v)| if let settings::Val::Str(f) = v { Some(f.clone()) } else { None })
+    });
+    let missing = font.filter(|f| config::resolve_family(f).is_none()).map(|f| {
+        let get = match f.as_str() {
+            "FiraCode" => " (github.com/tonsky/FiraCode)",
+            "Ubuntu Mono" => " (design.ubuntu.com/font)",
+            "Menlo" => " (it comes with macOS)",
+            _ => "",
+        };
+        format!(" Its font, {f}, isn't installed{get}; using yours meanwhile.")
+    });
+    let prompt = settings::STYLES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .is_some_and(|(_, vals)| vals.iter().any(|(k, v)| *k == "prompt" && *v != settings::Val::Str("default".into())));
+    let tabs = if prompt { " New tabs get its prompt." } else { "" };
+    format!("style: {label}.{}{tabs}", missing.unwrap_or_default())
+}
+
+/// Local wall-clock time: (year, month 1-12, day, hour, minute).
+fn local_now() -> (u32, u32, u32, u32, u32) {
+    #[cfg(windows)]
+    {
+        let mut st = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>() };
+        unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
+        (st.wYear as u32, st.wMonth as u32, st.wDay as u32, st.wHour as u32, st.wMinute as u32)
+    }
+    #[cfg(not(windows))]
+    {
+        // UTC (no time zone database here)
+        let secs = history::now();
+        let days = (secs / 86_400) as i64;
+        let (y, m, d) = civil_from_days(days);
+        (y as u32, m, d, ((secs % 86_400) / 3600) as u32, ((secs % 3600) / 60) as u32)
+    }
+}
+
+#[cfg(not(windows))]
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    // Howard Hinnant's days-to-civil
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// tmux's own status line (its defaults): `[0] 0:pwsh* 1:bash-` on the
+/// left, `"title" 14:05 14-Nov-26` on the right, black on green.
+fn tmux_status(t: &vibex_render::Theme, s: &Snapshot, now: (u32, u32, u32, u32, u32)) -> StatusLine {
+    let (fg, bg) = (t.palette[0], t.palette[2]);
+    let seg = |text: String| StatusSegment { text, fg: Some(fg), bg: Some(bg), bold: false };
+    let mut left = vec![seg("[0] ".into())];
+    let titles: Vec<String> = if s.tab_titles.is_empty() { vec![s.profile.clone()] } else { s.tab_titles.clone() };
+    for (i, title) in titles.iter().enumerate() {
+        // * marks the current window, - the one before it (tmux's flags)
+        let flag = if i + 1 == s.tab_index {
+            "*"
+        } else if s.tab_index > 1 && i + 2 == s.tab_index {
+            "-"
+        } else {
+            ""
+        };
+        let name: String = title.chars().take(20).collect();
+        left.push(seg(format!("{i}:{name}{flag} ")));
+    }
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let (y, mo, d, h, mi) = now;
+    let title: String = if s.title.is_empty() { s.profile.clone() } else { s.title.clone() }.chars().take(21).collect();
+    let right = vec![seg(format!("\"{title}\" {h:02}:{mi:02} {d:02}-{}-{:02} ", MONTHS[(mo.clamp(1, 12) - 1) as usize], y % 100))];
+    StatusLine { left, right, background: Some(bg) }
+}
+
 /// Status line used when vibex.lua has no `update-status` handler.
-fn default_status(t: &vibex_render::Theme, s: &Snapshot) -> StatusLine {
+fn default_status(t: &vibex_render::Theme, s: &Snapshot, style: &str) -> StatusLine {
+    if style == "tmux" {
+        return tmux_status(t, s, local_now());
+    }
     let mut left = vec![StatusSegment { text: format!(" {} ", s.profile), fg: Some(t.cursor_text), bg: Some(t.cursor), bold: true }];
     if !s.cwd.is_empty() {
         left.push(StatusSegment { text: format!(" {}", s.cwd), ..Default::default() });
@@ -684,7 +772,34 @@ fn default_status(t: &vibex_render::Theme, s: &Snapshot) -> StatusLine {
         right.push(StatusSegment { text: format!("{} panes  ", s.pane_count), ..Default::default() });
     }
     right.push(StatusSegment { text: format!("{}×{} ", s.cols, s.rows), ..Default::default() });
-    StatusLine { left, right }
+    StatusLine { left, right, background: None }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn tmux_status_line() {
+        let t = vibex_render::Theme::builtin("xterm").unwrap();
+        let s = Snapshot {
+            title: "build".into(),
+            profile: "pwsh".into(),
+            tab_titles: vec!["pwsh".into(), "bash".into(), "logs".into()],
+            tab_index: 3,
+            ..Default::default()
+        };
+        let line = tmux_status(&t, &s, (2026, 11, 14, 9, 5));
+        let left: String = line.left.iter().map(|x| x.text.as_str()).collect();
+        let right: String = line.right.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(left, "[0] 0:pwsh 1:bash- 2:logs* ");
+        assert_eq!(right, "\"build\" 09:05 14-Nov-26 ");
+        // black on green, edge to edge
+        assert_eq!(line.background, Some(t.palette[2]));
+        assert!(line.left.iter().all(|x| x.fg == Some(t.palette[0])));
+        // the Vibex one has no colour of its own
+        assert_eq!(default_status(&t, &s, "vibex").background, None);
+    }
 }
 
 /// Open a file with its associated app (falls back to Notepad).
@@ -941,6 +1056,62 @@ fn acrylic_opacity(opacity: f32) -> f32 {
     const LUMINOSITY: f32 = 0.75;
     let o = opacity.clamp(0.0, 1.0);
     1.0 - (1.0 - o) * (1.0 - LUMINOSITY)
+}
+
+/// Testing the GPU-loss fallback: with `VIBEX_DEBUG_LOSE_GPU=SECONDS` set,
+/// true once, on the first frame that many seconds after start (the
+/// renderer then throws its device away, as a driver reset would).
+fn debug_lose_gpu_now() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
+    static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+    static DONE: AtomicBool = AtomicBool::new(false);
+    let due = DUE.get_or_init(|| {
+        let secs = std::env::var("VIBEX_DEBUG_LOSE_GPU").ok()?.parse::<f64>().ok()?;
+        Some(Instant::now() + Duration::from_secs_f64(secs.max(0.0)))
+    });
+    match due {
+        Some(at) if Instant::now() >= *at => !DONE.swap(true, Ordering::Relaxed),
+        _ => false,
+    }
+}
+
+/// Where the cursor is: only the shell's output moves it, so a change after
+/// a key press is its echo (Vibex's own redraws don't count).
+fn cursor_mark(t: &Terminal) -> u64 {
+    (t.cursor.x as u64) | ((t.cursor.y as u64) << 32)
+}
+
+/// Measuring input latency: with `VIBEX_DEBUG_LATENCY` set, each key press
+/// is timed until the first presented frame after the shell's echo moved
+/// the cursor, and printed to stderr as `latency-ms N`.
+/// The key press being timed: when, and where the cursor was.
+type PendingKey = std::sync::Mutex<Option<(Instant, u64)>>;
+
+fn debug_latency() -> &'static Option<PendingKey> {
+    static L: std::sync::OnceLock<Option<PendingKey>> = std::sync::OnceLock::new();
+    L.get_or_init(|| std::env::var_os("VIBEX_DEBUG_LATENCY").map(|_| std::sync::Mutex::new(None)))
+}
+
+fn debug_latency_key(generation: u64) {
+    if let Some(m) = debug_latency() {
+        if let Ok(mut g) = m.lock() {
+            *g = Some((Instant::now(), generation));
+        }
+    }
+}
+
+fn debug_latency_frame(generation: u64) {
+    if let Some(m) = debug_latency() {
+        if let Ok(mut g) = m.lock() {
+            if let Some((at, gen0)) = *g {
+                if generation != gen0 {
+                    eprintln!("latency-ms {:.2}", at.elapsed().as_secs_f64() * 1000.0);
+                    *g = None;
+                }
+            }
+        }
+    }
 }
 
 /// The glass look keeps only a thin luminosity layer, so `opacity` is
@@ -1709,7 +1880,7 @@ impl App {
         renderer.padding_y = cfg.padding.1;
         renderer.status_bar = cfg.status_bar;
         renderer.glass = cfg.glass;
-        renderer.classic_bar = cfg.title_bar == "classic";
+        renderer.bar_kind = vibex_render::BarKind::from_name(&cfg.title_bar);
         renderer.ui_scale = window.scale_factor() as f32;
 
         let blink_interval = Duration::from_millis(cfg.blink_interval_ms);
@@ -2433,7 +2604,8 @@ impl Session {
         if self.focus_mode || (self.fullscreen && self.tabs.len() <= 1) {
             return false;
         }
-        if self.custom_chrome || self.config.title_bar == "classic" {
+        // a titled bar (Kali, Windows, GNOME, macOS, tmux) is always shown
+        if self.custom_chrome || vibex_render::BarKind::from_name(&self.config.title_bar) != vibex_render::BarKind::Tabs {
             return true;
         }
         match self.config.tab_bar {
@@ -2477,15 +2649,16 @@ impl Session {
                 }
             })
             .collect::<Vec<_>>();
-        let classic = self.config.title_bar == "classic";
+        let kind = vibex_render::BarKind::from_name(&self.config.title_bar);
+        let titled = kind != vibex_render::BarKind::Tabs;
         TabBar {
             tabs,
             window_buttons: self.custom_chrome && !self.fullscreen,
             maximized: self.window.is_maximized(),
             hover: self.tab_hover,
             caption: self.eng.as_ref().map(|e| format!("\u{25cf} engagement: {}", e.name)),
-            classic,
-            title: if classic { self.panes.get(&self.active_id()).map(|p| p.title()).unwrap_or_default() } else { String::new() },
+            kind,
+            title: if titled { self.panes.get(&self.active_id()).map(|p| p.title()).unwrap_or_default() } else { String::new() },
             menu_open: self.classic_menu.filter(|_| self.menu.is_some()),
         }
     }
@@ -2934,13 +3107,41 @@ impl Session {
     }
 
     /// The GPU renderer lost its device: switch this window to the CPU one.
+    /// (Tested live with `VIBEX_DEBUG_LOSE_GPU=SECONDS`: see
+    /// `debug_lose_gpu_now`.)
     fn fall_back_to_cpu(&mut self) {
+        // First a new GPU device: after a driver reset the GPU usually works
+        // again, and failing that Windows' software GPU (WARP) draws through
+        // the same kind of swapchain. The CPU renderer is last: it draws
+        // with GDI, which a see-through window (no redirection surface)
+        // never shows, so there the window would go blank.
+        let mut transparent = false;
+        if let Backend::Gpu(old) = &mut self.backend {
+            transparent = old.transparent;
+            old.release_surface();
+        }
+        let size = self.window.inner_size();
+        // (VIBEX_DEBUG_LOSE_GPU_WARP: testing, skip straight to WARP)
+        let tries: &[bool] = if std::env::var_os("VIBEX_DEBUG_LOSE_GPU_WARP").is_some() { &[true] } else { &[false, true] };
+        for &software in tries {
+            match GpuRenderer::new_on(self.window.clone(), size.width.max(1), size.height.max(1), transparent, software) {
+                Ok(gpu) => {
+                    eprintln!("vibex: GPU device lost: started again on {}", gpu.adapter_info);
+                    self.backend = Backend::Gpu(Box::new(gpu));
+                    self.toast("The graphics driver reset: Vibex reconnected to the GPU", 5.0);
+                    self.window.request_redraw();
+                    return;
+                }
+                Err(e) => eprintln!("vibex: GPU device lost; a new {} device failed: {e}", if software { "software" } else { "GPU" }),
+            }
+        }
         let cpu = softbuffer::Context::new(self.window.clone())
             .and_then(|context| softbuffer::Surface::new(&context, self.window.clone()).map(|surface| (context, surface)));
         match cpu {
             Ok((context, surface)) => {
                 self.window.set_transparent(false);
                 self.backend = Backend::Cpu { _context: context, surface, last: Vec::new(), scratch: Vec::new() };
+                eprintln!("vibex: GPU device lost: switched to the software renderer");
                 self.toast("The graphics driver reset: Vibex switched to its software renderer for this window", 5.0);
             }
             Err(e) => eprintln!("vibex: GPU lost and no CPU renderer: {e}"),
@@ -3128,11 +3329,16 @@ impl Session {
             }
         }
 
+        let drawn_generation = cursor_mark(&self.active().term);
         match &mut self.backend {
             Backend::Gpu(gpu) => {
+                if debug_lose_gpu_now() {
+                    gpu.debug_lose_device();
+                }
                 gpu.resize(w.get(), h.get());
                 let o = if self.config.glass { glass_opacity(self.opacity) } else { acrylic_opacity(self.opacity) };
                 gpu.render(&scene, &mut self.renderer.fonts, o);
+                debug_latency_frame(drawn_generation);
                 if gpu.device_lost() {
                     // the GPU went away (driver reset, sleep, GPU switch):
                     // carry on with the CPU renderer instead of freezing
@@ -4914,6 +5120,7 @@ impl Session {
             pane_count: tab.root.panes().len(),
             cwd: p.term.cwd().unwrap_or_default().to_string(),
             last_exit: p.term.last_exit(),
+            tab_titles: self.tab_bar_model().tabs.into_iter().map(|t| t.title).collect(),
         }
     }
 
@@ -5700,16 +5907,7 @@ impl Session {
                 return;
             }
             self.reload_config(false);
-            let font_missing = name == "dragon" && config::resolve_family("FiraCode").is_none();
-            let msg = match name {
-                "dragon" if font_missing => {
-                    "style: Dragon (Kali Linux). Its font, Fira Code, isn't installed: get it from github.com/tonsky/FiraCode (new tabs get the prompt)"
-                        .to_string()
-                }
-                "dragon" => "style: Dragon (Kali Linux); new tabs get its prompt".to_string(),
-                _ => "style: Vibex (back to vibex.lua)".to_string(),
-            };
-            self.toast(msg, if font_missing { 7.0 } else { 3.0 });
+            self.toast(style_notice(name), 6.0);
             return;
         }
         let mut cfg = self.config.clone();
@@ -5780,7 +5978,7 @@ impl Session {
             enable_backdrop(&self.window, cfg.glass);
         }
         self.renderer.glass = cfg.glass;
-        self.renderer.classic_bar = cfg.title_bar == "classic";
+        self.renderer.bar_kind = vibex_render::BarKind::from_name(&cfg.title_bar);
         if cfg.opacity != self.opacity {
             self.set_opacity(cfg.opacity);
         }
@@ -5815,10 +6013,10 @@ impl Session {
                 }
                 line
             }
-            Ok(None) => default_status(&self.renderer.theme, &self.snapshot()),
+            Ok(None) => default_status(&self.renderer.theme, &self.snapshot(), &self.config.status_style),
             Err(e) => {
                 self.lua_error(e);
-                default_status(&self.renderer.theme, &self.snapshot())
+                default_status(&self.renderer.theme, &self.snapshot(), &self.config.status_style)
             }
         };
         if self.status.as_ref() != Some(&line) {
@@ -6372,8 +6570,10 @@ impl ApplicationHandler<AppEvent> for App {
                 s.window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // another monitor or scale: keep the zoom (Ctrl+=/-) as it was
+                let zoom = if s.base_font_px > 0.0 { s.renderer.fonts.size_px() / s.base_font_px } else { 1.0 };
                 s.base_font_px = font_px(font_pt, scale_factor);
-                let px = s.base_font_px;
+                let px = s.base_font_px * zoom;
                 s.renderer.ui_scale = scale_factor as f32;
                 s.set_font_px(px);
             }
@@ -6391,7 +6591,12 @@ impl ApplicationHandler<AppEvent> for App {
                 s.mods = m.state();
                 s.update_hover();
             }
-            WindowEvent::KeyboardInput { event, .. } => s.key(event),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state.is_pressed() && debug_latency().is_some() {
+                    debug_latency_key(cursor_mark(&s.active().term));
+                }
+                s.key(event)
+            }
             WindowEvent::MouseWheel { delta, .. } => s.wheel(delta),
             WindowEvent::CursorMoved { position, .. } => s.mouse_moved(position),
             WindowEvent::CursorLeft { .. } => {
@@ -6474,7 +6679,7 @@ fn render_preview(out: &std::path::Path, cfg: &Config, engine: &Engine, profile:
     r.padding_y = cfg.padding.1;
     r.status_bar = cfg.status_bar;
     r.glass = cfg.glass;
-    r.classic_bar = cfg.title_bar == "classic";
+    r.bar_kind = vibex_render::BarKind::from_name(&cfg.title_bar);
     // VIBEX_PREVIEW_SCALE=1.25 previews the title bar at 125% display scaling
     r.ui_scale = std::env::var("VIBEX_PREVIEW_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let settings_page = std::env::var("VIBEX_PREVIEW_SETTINGS").ok();
@@ -6494,7 +6699,7 @@ fn render_preview(out: &std::path::Path, cfg: &Config, engine: &Engine, profile:
         maximized: false,
         hover: Some(TabHit::NewTab),
         caption: None,
-        classic: cfg.title_bar == "classic",
+        kind: vibex_render::BarKind::from_name(&cfg.title_bar),
         title: "dev@vibex: ~".into(),
         menu_open: None,
     };
@@ -6621,7 +6826,7 @@ fn render_preview(out: &std::path::Path, cfg: &Config, engine: &Engine, profile:
     }
     let status = match engine.status(snap.clone())? {
         Some((line, _)) => line,
-        None => default_status(&cfg.theme, &snap),
+        None => default_status(&cfg.theme, &snap, &cfg.status_style),
     };
     let mut chrome = Chrome {
         tabbar: Some((bar, bar_layout)),

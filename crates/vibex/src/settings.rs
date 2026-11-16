@@ -77,6 +77,7 @@ pub const KEYS: &[&str] = &[
     "right_click",
     "prompt",
     "title_bar",
+    "status_style",
 ];
 
 /// Top-level keys stored as-is (the cursor / scroll ones are nested).
@@ -116,6 +117,7 @@ const FLAT: &[&str] = &[
     "right_click",
     "prompt",
     "title_bar",
+    "status_style",
 ];
 
 /// A shortcut set in Settings: key and modifiers, or None = no key.
@@ -243,7 +245,9 @@ impl Settings {
             match (k.as_str(), v) {
                 ("theme", Val::Str(name)) => {
                     if let Some(t) = vibex_render::Theme::builtin(name) {
-                        c.theme = t;
+                        // vibex.lua's readable_colors choice carries over
+                        let readable = c.theme.readable;
+                        c.theme = vibex_render::Theme { readable, ..t };
                     }
                 }
                 ("font_size", Val::Num(n)) => c.font_size_pt = (*n as f32).clamp(4.0, 72.0),
@@ -301,8 +305,9 @@ impl Settings {
                 ("collect_loot", Val::Bool(b)) => c.collect_loot = *b,
                 ("engagement", Val::Str(e)) => c.engagement = (!e.trim().is_empty()).then(|| e.trim().to_string()),
                 ("right_click", Val::Str(m)) => c.right_click_menu = m != "paste",
-                ("prompt", Val::Str(p)) if p == "default" || p == "dragon" => c.prompt = p.clone(),
-                ("title_bar", Val::Str(t)) if t == "tabs" || t == "classic" => c.title_bar = t.clone(),
+                ("prompt", Val::Str(p)) if crate::config::PROMPTS.contains(&p.as_str()) => c.prompt = p.clone(),
+                ("title_bar", Val::Str(t)) if vibex_render::BarKind::NAMES.contains(&t.as_str()) => c.title_bar = t.clone(),
+                ("status_style", Val::Str(t)) if crate::config::STATUS_STYLES.contains(&t.as_str()) => c.status_style = t.clone(),
                 ("update_feed", Val::Str(u)) if (u.is_empty() || u.starts_with("https://")) => {
                     c.update_feed = u.clone();
                 }
@@ -382,11 +387,23 @@ pub fn bool_of(c: &Config, key: &str) -> bool {
 /// Apply `change` to `cfg` and record it in `s`.
 /// What each style sets. "vibex" sets nothing (it clears them all).
 pub const STYLE_KEYS: &[&str] =
-    &["theme", "prompt", "title_bar", "font_family", "font_size", "padding", "opacity", "glass", "shell_marks", "status_bar", "cursor_style"];
+    &["theme", "prompt", "title_bar", "font_family", "font_size", "padding", "opacity", "glass", "shell_marks", "status_bar", "status_style", "cursor_style"];
 
-/// Kali Linux's QTerminal, from Kali's own configuration: its Kali-Dark
-/// colours, two-line prompt, Fira Code 10 pt, 5 px margin, 5% see-through,
-/// no gutter marks or status bar, a block cursor.
+/// The whole looks. Each sets every key it cares about; the keys it leaves
+/// out come back from vibex.lua (a style never leaves another's behind).
+///
+/// - dragon: Kali Linux's QTerminal, from Kali's own configuration: its
+///   Kali-Dark colours, two-line prompt, Fira Code 10 pt, 5 px margin, 5%
+///   see-through, no gutter marks or status bar, a block cursor.
+/// - cmd: the Windows console running cmd.exe: Campbell colours,
+///   `C:\path>`, Consolas 12, the console's underline cursor, no margin.
+/// - powershell: the same console running Windows PowerShell: its blue.
+/// - gnome: GNOME Terminal as Ubuntu ships it: Tango on aubergine, the
+///   green and blue `user@host:~$`, Ubuntu Mono 13, the header bar.
+/// - macos: macOS Terminal's Basic profile: black on white, `user@host
+///   dir %`, Menlo 11, traffic lights.
+/// - tmux: tmux's green status line (session, windows, title, clock) on
+///   xterm's colours; the font stays yours.
 pub static STYLES: std::sync::LazyLock<Vec<(&'static str, Vec<(&'static str, Val)>)>> = std::sync::LazyLock::new(|| {
     vec![
         ("vibex", Vec::new()),
@@ -403,6 +420,85 @@ pub static STYLES: std::sync::LazyLock<Vec<(&'static str, Vec<(&'static str, Val
                 ("glass", Val::Bool(false)),
                 ("shell_marks", Val::Bool(false)),
                 ("status_bar", Val::Bool(false)),
+                ("cursor_style", Val::Str("block".into())),
+            ],
+        ),
+        (
+            "cmd",
+            vec![
+                ("theme", Val::Str("campbell".into())),
+                ("prompt", Val::Str("cmd".into())),
+                ("title_bar", Val::Str("windows".into())),
+                ("font_family", Val::Str("Consolas".into())),
+                ("font_size", Val::Num(12.0)),
+                ("padding", Val::Num(2.0)),
+                ("opacity", Val::Num(1.0)),
+                ("glass", Val::Bool(false)),
+                ("shell_marks", Val::Bool(false)),
+                ("status_bar", Val::Bool(false)),
+                ("cursor_style", Val::Str("underline".into())),
+            ],
+        ),
+        (
+            "powershell",
+            vec![
+                ("theme", Val::Str("campbell-powershell".into())),
+                ("prompt", Val::Str("default".into())),
+                ("title_bar", Val::Str("windows".into())),
+                ("font_family", Val::Str("Consolas".into())),
+                ("font_size", Val::Num(12.0)),
+                ("padding", Val::Num(2.0)),
+                ("opacity", Val::Num(1.0)),
+                ("glass", Val::Bool(false)),
+                ("shell_marks", Val::Bool(false)),
+                ("status_bar", Val::Bool(false)),
+                ("cursor_style", Val::Str("underline".into())),
+            ],
+        ),
+        (
+            "gnome",
+            vec![
+                ("theme", Val::Str("ubuntu".into())),
+                ("prompt", Val::Str("ubuntu".into())),
+                ("title_bar", Val::Str("gnome".into())),
+                ("font_family", Val::Str("Ubuntu Mono".into())),
+                ("font_size", Val::Num(13.0)),
+                ("padding", Val::Num(4.0)),
+                ("opacity", Val::Num(1.0)),
+                ("glass", Val::Bool(false)),
+                ("shell_marks", Val::Bool(false)),
+                ("status_bar", Val::Bool(false)),
+                ("cursor_style", Val::Str("block".into())),
+            ],
+        ),
+        (
+            "macos",
+            vec![
+                ("theme", Val::Str("terminal-basic".into())),
+                ("prompt", Val::Str("macos".into())),
+                ("title_bar", Val::Str("macos".into())),
+                ("font_family", Val::Str("Menlo".into())),
+                ("font_size", Val::Num(11.0)),
+                ("padding", Val::Num(4.0)),
+                ("opacity", Val::Num(1.0)),
+                ("glass", Val::Bool(false)),
+                ("shell_marks", Val::Bool(false)),
+                ("status_bar", Val::Bool(false)),
+                ("cursor_style", Val::Str("block".into())),
+            ],
+        ),
+        (
+            "tmux",
+            vec![
+                ("theme", Val::Str("xterm".into())),
+                ("prompt", Val::Str("default".into())),
+                ("title_bar", Val::Str("tmux".into())),
+                ("padding", Val::Num(2.0)),
+                ("opacity", Val::Num(1.0)),
+                ("glass", Val::Bool(false)),
+                ("shell_marks", Val::Bool(false)),
+                ("status_bar", Val::Bool(true)),
+                ("status_style", Val::Str("tmux".into())),
                 ("cursor_style", Val::Str("block".into())),
             ],
         ),
@@ -504,6 +600,45 @@ mod tests {
         change(&mut s, &mut c, &Change::Style("vibex"));
         assert_eq!(style_of(&s), Some("vibex"));
         assert!(STYLE_KEYS.iter().all(|k| !s.values.contains_key(*k)));
+    }
+
+    #[test]
+    fn every_style_switches_cleanly() {
+        let names: Vec<&str> = STYLES.iter().map(|(n, _)| *n).collect();
+        // every style is in the dropdown, and the other way round
+        let ui: Vec<&str> = crate::settings_ui::STYLE_NAMES.iter().map(|(_, n)| *n).collect();
+        assert_eq!(names, ui);
+        for (name, vals) in STYLES.iter() {
+            for (k, v) in vals {
+                assert!(STYLE_KEYS.contains(k), "{name}: {k} isn't a style key (it wouldn't be cleared)");
+                match (*k, v) {
+                    ("theme", Val::Str(t)) => assert!(vibex_render::Theme::builtin(t).is_some(), "{name}: no theme {t}"),
+                    ("prompt", Val::Str(p)) => assert!(crate::config::PROMPTS.contains(&p.as_str()), "{name}: prompt {p}"),
+                    ("title_bar", Val::Str(t)) => assert!(vibex_render::BarKind::NAMES.contains(&t.as_str()), "{name}: title bar {t}"),
+                    ("status_style", Val::Str(t)) => assert!(crate::config::STATUS_STYLES.contains(&t.as_str()), "{name}: status {t}"),
+                    _ => {}
+                }
+            }
+        }
+        // from any style to any other: only the new one's values are left,
+        // and the config shows it
+        for from in &names {
+            for to in &names {
+                let mut s = Settings::default();
+                let mut c = Config::default();
+                change(&mut s, &mut c, &Change::Style(from));
+                change(&mut s, &mut c, &Change::Style(to));
+                assert_eq!(style_of(&s), Some(*to), "{from} -> {to}");
+                let want = &STYLES.iter().find(|(n, _)| n == to).unwrap().1;
+                let left: Vec<&String> = s.values.keys().filter(|k| STYLE_KEYS.contains(&k.as_str())).collect();
+                assert_eq!(left.len(), want.len(), "{from} -> {to}: {left:?}");
+                if let Some((_, Val::Str(t))) = want.iter().find(|(k, _)| *k == "title_bar") {
+                    assert_eq!(&c.title_bar, t, "{from} -> {to}");
+                }
+                // and it survives a save
+                assert_eq!(style_of(&Settings::parse(&s.to_lua()).unwrap()), Some(*to), "{from} -> {to}");
+            }
+        }
     }
 
     #[test]

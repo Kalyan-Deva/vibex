@@ -2,14 +2,131 @@ use super::*;
 use vibex_term::Terminal;
 use vibex_vt::Parser;
 
+/// Readability of every built-in theme (run with --nocapture for the table).
+/// WCAG contrast: 4.5 is "readable text", 3.0 large text / UI parts.
+#[test]
+fn theme_readability_report() {
+    use crate::theme::contrast;
+    let names = ["blk", "red", "grn", "yel", "blu", "mag", "cyn", "wht", "BLK", "RED", "GRN", "YEL", "BLU", "MAG", "CYN", "WHT"];
+    println!("{:<20} {:>5} {:>5} {:>5} {:>5}  weakest ANSI on bg (excl. black/white family)", "theme", "text", "sel", "curs", "c.txt");
+    let mut problems = Vec::new();
+    for id in Theme::ids() {
+        let raw = Theme::builtin(id).unwrap();
+        let t = raw.for_drawing();
+        // what's drawn: text colours as adjusted for the default background
+        let shown = t.fg_palette.unwrap();
+        let fg_bg = contrast(t.foreground, t.background);
+        if contrast(t.foreground, t.selection) < crate::theme::MIN_SELECTION_CONTRAST - 0.05 {
+            problems.push(format!("{id}: selected text {:.1}", contrast(t.foreground, t.selection)));
+        }
+        if contrast(t.cursor, t.background) < crate::theme::MIN_CURSOR_CONTRAST - 0.05 {
+            problems.push(format!("{id}: cursor {:.1}", contrast(t.cursor, t.background)));
+        }
+        if contrast(t.cursor_text, t.cursor) < 3.0 {
+            problems.push(format!("{id}: text under the cursor {:.1}", contrast(t.cursor_text, t.cursor)));
+        }
+        if fg_bg < 4.0 {
+            problems.push(format!("{id}: text {fg_bg:.1}"));
+        }
+        for (i, c) in shown.iter().enumerate() {
+            if contrast(*c, t.background) < crate::theme::MIN_TEXT_CONTRAST - 0.05 {
+                problems.push(format!("{id}: ANSI {i} {:.1}", contrast(*c, t.background)));
+            }
+        }
+        // the scheme's own palette is untouched
+        assert_eq!(t.palette, raw.palette, "{id}");
+        let t = Theme { palette: shown, ..t };
+        let sel = contrast(t.foreground, t.selection);
+        let cur = contrast(t.cursor, t.background);
+        let cur_txt = contrast(t.cursor_text, t.cursor);
+        // colours that are text on the default background: 1-6, 9-14, and
+        // 8 (bright black: comments, hints) - plus white on light themes,
+        // black on dark ones
+        let mut weak: Vec<(f32, &str)> = (1..16)
+            .filter(|i| *i != 7 && *i != 15 || t.is_light())
+            .filter(|i| *i != 0 || !t.is_light())
+            .map(|i| (contrast(t.palette[i], t.background), names[i]))
+            .collect();
+        weak.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let w: Vec<String> = weak.iter().take(3).map(|(c, n)| format!("{n} {c:.1}")).collect();
+        println!("{:<20} {:>5.1} {:>5.1} {:>5.1} {:>5.1}  {}", id, fg_bg, sel, cur, cur_txt, w.join(", "));
+    }
+    assert!(problems.is_empty(), "hard to read:\n{}", problems.join("\n"));
+}
+
+#[test]
+fn readable_adjustments_are_small_and_optional() {
+    use crate::theme::contrast;
+    // a colour that already reads is left exactly as it is
+    let t = Theme::builtin("dracula").unwrap().for_drawing();
+    let p = t.fg_palette.unwrap();
+    assert_eq!(p[1], t.palette[1]);
+    // Solarized Dark's bright black is its background colour: drawn visible
+    let s = Theme::builtin("solarized-dark").unwrap();
+    assert_eq!(s.palette[8], s.background);
+    let d = s.for_drawing();
+    assert!(contrast(d.fg_palette.unwrap()[8], d.background) >= 1.95);
+    // Ayu Dark's selection hid the text; the toned-down one keeps its blue
+    let a = Theme::builtin("ayu-dark").unwrap();
+    let ad = a.for_drawing();
+    assert_ne!(ad.selection, a.selection);
+    assert!((ad.selection & 0xff) > ((ad.selection >> 16) & 0xff), "still blue: {:06x}", ad.selection);
+    // turned off: everything exactly as the scheme says
+    let off = Theme { readable: false, ..Theme::builtin("ayu-dark").unwrap() }.for_drawing();
+    assert!(off.fg_palette.is_none());
+    assert_eq!((off.selection, off.cursor, off.cursor_text), (a.selection, a.cursor, a.cursor_text));
+}
+
 #[test]
 fn status_text_is_shortened_from_the_front() {
     use crate::scene::keep_end;
-    assert_eq!(keep_end(r" C:\Users\kalya\stress\imgs", 12), r" …tress\imgs");
+    assert_eq!(keep_end(r" C:\Users\me\stress\imgs", 12), r" …tress\imgs");
     assert_eq!(keep_end(" short", 12), " short");
     assert_eq!(keep_end("abcdef", 4), "…def");
     assert_eq!(keep_end(" 日本語のフォルダ", 8), " …ォルダ");
     assert!(crate::text_width(&keep_end(" 日本語のフォルダ", 7)) <= 7);
+}
+
+/// Every theme drawn by the real (CPU) renderer, one BMP each, for looking
+/// at: `VIBEX_THEME_GALLERY=dir cargo test -p vibex-render theme_gallery -- --ignored`
+#[test]
+#[ignore]
+fn theme_gallery() {
+    let Some(dir) = std::env::var_os("VIBEX_THEME_GALLERY") else { return };
+    let Some(mut r) = renderer() else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    for id in Theme::ids() {
+        r.theme = Theme::builtin(id).unwrap();
+        let mut text = format!("\x1b[1m{}\x1b[0m\r\n", Theme::title(id));
+        for (base, label) in [(30, "normal"), (90, "bright")] {
+            text.push_str(&format!("{label:<7}"));
+            for (i, n) in ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"].iter().enumerate() {
+                text.push_str(&format!("\x1b[{}m{n}\x1b[0m ", base + i));
+            }
+            text.push_str("\r\n");
+        }
+        text.push_str("on bg  ");
+        for i in 0..8 {
+            text.push_str(&format!("\x1b[4{i}m \x1b[3{}m{i} \x1b[0m", if i == 0 { 7 } else { 0 }));
+        }
+        text.push_str("\r\n\x1b[1mbold\x1b[0m \x1b[2mdim (hints, comments)\x1b[0m \x1b[3mitalic\x1b[0m \x1b[4munderline\x1b[0m \x1b[7m inverse \x1b[0m\r\n");
+        text.push_str("selected: plain text \x1b[31mred \x1b[32mgreen \x1b[34mblue\x1b[0m, and \x1b[90mbright black\x1b[0m\r\n");
+        text.push_str("\x1b[90m# a comment in bright black\x1b[0m\r\n");
+        text.push_str("\x1b[32m~/code\x1b[0m \x1b[34m❯\x1b[0m git status");
+        let t = term(70, 9, &text);
+        let st = DrawState {
+            focused: true,
+            cursor_visible: true,
+            selection: Some(VisibleSelection { start: (0, 5), end: (52, 5), block: false }),
+            ..Default::default()
+        };
+        let (w, h) = (700, 9 * r.fonts.cell_height + 16);
+        let scene = r.build_scene(&t, &st, w, h);
+        let mut px = vec![0u32; w * h];
+        let mut frame = crate::cpu::Frame { pixels: &mut px, width: w, height: h };
+        crate::cpu::draw(&scene, &mut r.fonts, &mut frame);
+        crate::write_bmp(&std::path::Path::new(&dir).join(format!("{id}.bmp")), &px, w, h).unwrap();
+    }
 }
 
 fn font(name: &str) -> Option<String> {
@@ -131,6 +248,69 @@ fn prompt_marks_drawn_in_gutter() {
     assert_eq!(rects(&with), rects(&without) + 1);
 }
 
+/// Every title bar, with one tab and with three, in a light and a dark
+/// theme, hovering each button in turn, maximized or not, wide and very
+/// narrow: draws without panicking, inside the window, and the pane area
+/// starts below it.
+#[test]
+fn every_title_bar_draws() {
+    use crate::BarKind;
+    let Some(mut r) = renderer() else { return };
+    for kind in [BarKind::Tabs, BarKind::Kali, BarKind::Windows, BarKind::Gnome, BarKind::Mac, BarKind::Tmux] {
+        for theme in ["tokyo-night", "terminal-basic"] {
+            r.theme = Theme::builtin(theme).unwrap();
+            r.bar_kind = kind;
+            for n in [1usize, 3] {
+                r.classic_tabs = n > 1;
+                for (width, maximized) in [(900usize, false), (900, true), (180, false)] {
+                    for hover in [None, Some(TabHit::Close), Some(TabHit::Minimize), Some(TabHit::Maximize), Some(TabHit::NewTab), Some(TabHit::Tab(1))] {
+                        let bar = TabBar {
+                            tabs: (0..n)
+                                .map(|i| TabInfo {
+                                    title: format!("tab {i} with a long title"),
+                                    active: i == 0,
+                                    alert: i == 2,
+                                    color: None,
+                                    editing: false,
+                                    icon: crate::TabIcon::Terminal,
+                                })
+                                .collect(),
+                            window_buttons: true,
+                            maximized,
+                            hover,
+                            caption: None,
+                            kind,
+                            title: "me@host: ~\\Documents\\a long folder name".into(),
+                            menu_open: None,
+                        };
+                        let layout = r.tabbar_layout(&bar, width);
+                        assert_eq!(layout.height, r.tabbar_height(), "{kind:?} {n} tabs");
+                        let mut scene = r.begin(width, 300);
+                        let chrome = Chrome { tabbar: Some((bar, layout)), ..Default::default() };
+                        r.draw_chrome(&mut scene, &chrome);
+                        let content = r.content_rect(width, 300, true);
+                        assert!(content.y >= r.tabbar_height() - 0.5, "{kind:?}: panes start below the bar");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn long_notices_wrap() {
+    use crate::scene::wrap_text;
+    let t = "style: GNOME Terminal (Ubuntu). Its font, Ubuntu Mono, isn't installed (design.ubuntu.com/font); using yours meanwhile.";
+    let lines = wrap_text(t, 40);
+    assert!(lines.iter().all(|l| crate::text_width(l) <= 40), "{lines:?}");
+    assert_eq!(lines.join(" "), t, "nothing lost or doubled");
+    // a word longer than a line is cut, not left to overflow
+    let lines = wrap_text("C:\\a\\very\\long\\path\\with\\no\\spaces\\at\\all", 10);
+    assert!(lines.iter().all(|l| crate::text_width(l) <= 10), "{lines:?}");
+    // existing line breaks stay
+    assert_eq!(wrap_text("one\ntwo", 40), ["one", "two"]);
+}
+
 #[test]
 fn chrome_draws_tabbar_and_palette() {
     let Some(mut r) = renderer() else { return };
@@ -140,7 +320,7 @@ fn chrome_draws_tabbar_and_palette() {
         maximized: false,
         hover: None,
         caption: None,
-        classic: false,
+        kind: crate::BarKind::Tabs,
         title: String::new(),
         menu_open: None,
     };

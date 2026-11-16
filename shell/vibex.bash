@@ -119,6 +119,14 @@ if [ "${TERM_PROGRAM:-}" = "Vibex" ]; then
     PS1='\[\e]0;\u@\h: \w\a\]'$__vibex_pc'┌──${VIRTUAL_ENV:+(\[\033[0;1m\]$(basename "$VIRTUAL_ENV")'$__vibex_pc')}('$__vibex_ic'\u㉿\h'$__vibex_pc')-[\[\033[0;1m\]\w'$__vibex_pc']\n'$__vibex_pc'└─'$__vibex_ic'\$\[\033[0m\] '
     unset __vibex_pc __vibex_ic
   fi
+  # config.prompt = "ubuntu": Ubuntu's own .bashrc prompt (bold green
+  # user@host, bold blue path); "macos": zsh's user@host dir %; "cmd": the
+  # Windows command prompt's path>
+  case "${VIBEX_PROMPT:-}" in
+    ubuntu) PS1='\[\e]0;\u@\h: \w\a\]\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ ' ;;
+    macos) PS1='\[\e]0;\u@\h: \w\a\]\u@\h \W %\[\033[0m\] ' ;;
+    cmd) PS1='\[\e]0;Command Prompt\a\]\w>' ;;
+  esac
 
   __vibex_hook
   __vibex_ps1 || :

@@ -22,7 +22,7 @@ pub use font::{is_emoji, FontPaths, FontSet, GlyphKey, Style};
 pub use gpu::GpuRenderer;
 pub use scene::{Clip, Item, PaneLayout, Scene};
 pub use settings_view::{ConfirmLayout, ConfirmView, Control, MenuIcon, MenuItem, MenuLayout, MenuView, SettingRow, SettingsHit, SettingsLayout, SettingsView};
-pub use tabbar::{PxRect, TabBar, TabBarLayout, TabHit, TabIcon, TabInfo};
+pub use tabbar::{BarKind, PxRect, TabBar, TabBarLayout, TabHit, TabIcon, TabInfo};
 pub use theme::{blend, Theme};
 
 /// Write a 0RGB pixel buffer as a 24-bit BMP (for headless previews).
@@ -181,6 +181,8 @@ pub struct StatusSegment {
 pub struct StatusLine {
     pub left: Vec<StatusSegment>,
     pub right: Vec<StatusSegment>,
+    /// The whole bar's colour (tmux's green line), else the theme's.
+    pub background: Option<u32>,
 }
 
 /// Fonts, theme and layout shared by both backends.
@@ -196,15 +198,15 @@ pub struct Renderer {
     /// Glass look: see-through title and status bars, a faint frosted
     /// sheen and a light edge.
     pub glass: bool,
-    /// The classic title bar (title + menu bar), and whether it shows a
-    /// tabs row (more than one tab).
-    pub classic_bar: bool,
+    /// Which title bar (`config.title_bar`), and whether there's more than
+    /// one tab (the titled bars then show a tab strip).
+    pub bar_kind: tabbar::BarKind,
     pub classic_tabs: bool,
 }
 
 impl Renderer {
     pub fn new(fonts: FontSet, theme: Theme) -> Self {
-        Self { fonts, theme, padding_x: 8, padding_y: 6, status_bar: false, ui_scale: 1.0, glass: false, classic_bar: false, classic_tabs: false }
+        Self { fonts, theme, padding_x: 8, padding_y: 6, status_bar: false, ui_scale: 1.0, glass: false, bar_kind: tabbar::BarKind::Tabs, classic_tabs: false }
     }
 
     /// Height of the status bar in pixels (0 when off).
@@ -217,11 +219,7 @@ impl Renderer {
     }
 
     pub fn tabbar_height(&self) -> f32 {
-        if self.classic_bar {
-            tabbar::classic_height(self.fonts.cell_height, self.ui_scale, self.classic_tabs)
-        } else {
-            tabbar::height(self.fonts.cell_height, self.ui_scale)
-        }
+        tabbar::kind_height(self.bar_kind, self.fonts.cell_height, self.ui_scale, self.classic_tabs)
     }
 
     /// The area for panes: below the tab bar (if any), above the status bar.
@@ -372,10 +370,10 @@ impl Renderer {
         let mut out = ChromeLayout::default();
         scene::dividers(scene, &self.theme, &chrome.dividers);
         if let Some((bar, layout)) = &chrome.tabbar {
-            if bar.classic {
-                scene::classic_bar(scene, &mut self.fonts, &self.theme, cw, ch, bar, layout, self.ui_scale, self.glass);
-            } else {
-                scene::tab_bar(scene, &mut self.fonts, &self.theme, cw, ch, bar, layout, self.ui_scale, self.glass);
+            match bar.kind {
+                tabbar::BarKind::Tabs => scene::tab_bar(scene, &mut self.fonts, &self.theme, cw, ch, bar, layout, self.ui_scale, self.glass),
+                tabbar::BarKind::Kali => scene::classic_bar(scene, &mut self.fonts, &self.theme, cw, ch, bar, layout, self.ui_scale, self.glass),
+                _ => scene::titled_bar(scene, &mut self.fonts, &self.theme, cw, ch, bar, layout, self.ui_scale),
             }
         }
         if self.status_bar {

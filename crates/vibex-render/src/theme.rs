@@ -13,7 +13,25 @@ pub struct Theme {
     pub palette: [u32; 16],
     /// Draw bold text with bright colours (classic xterm behaviour).
     pub bold_is_bright: bool,
+    /// Keep text readable whatever the scheme does: ANSI colours too close
+    /// to the background are nudged, a selection colour that would hide
+    /// the text is toned down, and a cursor that would vanish is made to
+    /// stand out (as Windows Terminal's "adjust indistinguishable colors").
+    /// The palette itself is never changed.
+    pub readable: bool,
+    /// The palette as drawn for text on the default background (filled in
+    /// by `for_drawing`).
+    pub fg_palette: Option<[u32; 16]>,
 }
+
+/// Text in a palette colour on the default background reaches at least
+/// this contrast (WCAG ratio): enough to read, while a scheme's dim
+/// colours (bright black for comments) still look dim.
+pub const MIN_TEXT_CONTRAST: f32 = 2.0;
+/// Text over the selection colour.
+pub const MIN_SELECTION_CONTRAST: f32 = 3.0;
+/// The cursor against the background.
+pub const MIN_CURSOR_CONTRAST: f32 = 3.0;
 
 impl Default for Theme {
     /// Tokyo Night, as in Windows Terminal's scheme of that name.
@@ -51,6 +69,8 @@ impl Theme {
                 0xf0f3f6, // bright white
             ],
             bold_is_bright: true,
+            readable: true,
+            fg_palette: None,
         }
     }
 
@@ -99,6 +119,8 @@ impl Theme {
             search_match: blend(s.background, s.palette[3], 110),
             palette: s.palette,
             bold_is_bright: true,
+            readable: true,
+            fg_palette: None,
         })
     }
 
@@ -118,6 +140,8 @@ impl Theme {
                     0x0097a7, 0x2b2a33,
                 ],
                 bold_is_bright: false,
+                readable: true,
+                fg_palette: None,
             }),
             // warm dark, orange accents
             "vibex-ember" => Some(Theme {
@@ -132,6 +156,8 @@ impl Theme {
                     0x82d4c4, 0xfff4e6,
                 ],
                 bold_is_bright: true,
+                readable: true,
+                fg_palette: None,
             }),
             // Tokyo Night (as in Windows Terminal's scheme of that name)
             "tokyo-night" => Some(Theme {
@@ -146,6 +172,8 @@ impl Theme {
                     0x7dcfff, 0xc0caf5,
                 ],
                 bold_is_bright: true,
+                readable: true,
+                fg_palette: None,
             }),
             _ => None,
         }
@@ -201,12 +229,104 @@ pub fn blend(bg: u32, fg: u32, alpha: u8) -> u32 {
     ch(16) | ch(8) | ch(0)
 }
 
+/// WCAG relative luminance, 0.0-1.0.
+pub fn luminance(c: u32) -> f32 {
+    let lin = |v: u32| {
+        let s = v as f32 / 255.0;
+        if s <= 0.040_45 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin((c >> 16) & 0xff) + 0.7152 * lin((c >> 8) & 0xff) + 0.0722 * lin(c & 0xff)
+}
+
+/// WCAG contrast ratio between two colours, 1.0 (none) to 21.0.
+pub fn contrast(a: u32, b: u32) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
 /// Perceived brightness, 0-255 (ITU-R 601 weights).
 pub fn luma(c: u32) -> u32 {
     (((c >> 16) & 0xff) * 299 + ((c >> 8) & 0xff) * 587 + (c & 0xff) * 114) / 1000
 }
 
+/// `c` moved away from `bg` (toward white on dark, black on light) until
+/// it reaches `min` contrast; unchanged if it already does.
+pub fn readable_on(c: u32, bg: u32, min: f32) -> u32 {
+    if contrast(c, bg) >= min {
+        return c;
+    }
+    let toward = if luminance(bg) < 0.18 { 0xffffff } else { 0x000000 };
+    // small steps keep the hue: the least change that does it
+    for a in (12..=255u32).step_by(12) {
+        let m = blend(c, toward, a as u8);
+        if contrast(m, bg) >= min {
+            return m;
+        }
+    }
+    toward
+}
+
 impl Theme {
+    /// The theme as drawn: the same colours, made readable (see
+    /// `readable`). Cheap enough to call once per frame.
+    pub fn for_drawing(&self) -> Theme {
+        let mut t = self.clone();
+        if !self.readable {
+            t.fg_palette = None;
+            return t;
+        }
+        let bg = self.background;
+        let mut fg = self.palette;
+        for c in fg.iter_mut() {
+            *c = readable_on(*c, bg, MIN_TEXT_CONTRAST);
+        }
+        t.fg_palette = Some(fg);
+        // a selection that hides the text (schemes often mean it as a
+        // see-through overlay): mix it into the background until the text
+        // reads, keeping its colour
+        if contrast(self.foreground, self.selection) < MIN_SELECTION_CONTRAST {
+            let mut best = (contrast(self.foreground, self.selection), self.selection);
+            for a in (40..=240u32).rev().step_by(10) {
+                let s = blend(bg, self.selection, a as u8);
+                let c = contrast(self.foreground, s);
+                if c > best.0 && contrast(s, bg) >= 1.1 {
+                    best = (c, s);
+                }
+                if c >= MIN_SELECTION_CONTRAST && contrast(s, bg) >= 1.1 {
+                    best = (c, s);
+                    break;
+                }
+            }
+            t.selection = best.1;
+        }
+        // a cursor that vanishes into the background: toward the text colour
+        if contrast(self.cursor, bg) < MIN_CURSOR_CONTRAST {
+            let mut c = self.cursor;
+            for a in (24..=255u32).step_by(24) {
+                c = blend(self.cursor, self.foreground, a as u8);
+                if contrast(c, bg) >= MIN_CURSOR_CONTRAST {
+                    break;
+                }
+            }
+            t.cursor = c;
+        }
+        // the character under a block cursor: whichever reads better on it
+        let cur = t.cursor;
+        let mut best = self.cursor_text;
+        for cand in [self.cursor_text, self.background, self.foreground] {
+            if contrast(cand, cur) > contrast(best, cur) + 0.5 {
+                best = cand;
+            }
+        }
+        t.cursor_text = best;
+        t
+    }
+
     /// Dark text on a pale background.
     pub fn is_light(&self) -> bool {
         luma(self.background) >= 128

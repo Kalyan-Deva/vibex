@@ -336,6 +336,108 @@ fn reflow_round_trip_with_scrollback() {
     assert_eq!(before, after);
 }
 
+// ConPTY's console host keeps its own copy of the screen (no history),
+// re-wraps it itself and sends no repaint, so after a resize its rows must
+// match ours exactly or its next absolute cursor move lands on the wrong
+// row (measured against OpenConsole's buffer: see `conpty_layout`).
+
+#[test]
+fn conpty_taller_adds_blank_rows_below() {
+    let mut t = term(5, 2, "1\r\n2\r\n3\r\n4");
+    t.conpty_layout = true;
+    t.resize(5, 4);
+    assert_eq!(t.screen_text(), "3\n4\n\n");
+    assert_eq!(t.cursor.y, 1);
+    assert_eq!(t.scrollback_len(), 2);
+}
+
+#[test]
+fn conpty_wider_keeps_the_top_row() {
+    // 4 wide: "ab" in history; on screen "cdef" "gh" "xy"
+    let mut t = term(4, 3, "ab\r\ncdefgh\r\nxy");
+    t.conpty_layout = true;
+    t.resize(10, 3);
+    assert_eq!(t.screen_text(), "cdefgh\nxy\n");
+    assert_eq!((t.cursor.x, t.cursor.y), (2, 1));
+    assert_eq!(t.absolute_row(0).unwrap().text(), "ab");
+}
+
+#[test]
+fn conpty_breaks_the_line_at_the_top_of_the_screen() {
+    // "abcd" scrolled into history, "efgh" + "ij" on screen: ConPTY only
+    // has the screen, so for it the line starts at "efgh"
+    let mut t = term(4, 2, "abcdefghij");
+    t.conpty_layout = true;
+    t.resize(10, 2);
+    assert_eq!(t.screen_text(), "efghij\n");
+    assert_eq!((t.cursor.x, t.cursor.y), (6, 0));
+    assert_eq!(t.absolute_row(0).unwrap().text(), "abcd");
+}
+
+#[test]
+fn conpty_narrower_scrolls_to_keep_the_cursor() {
+    let mut t = term(10, 3, "one\r\nabcdefgh\r\nxy");
+    t.conpty_layout = true;
+    t.resize(4, 3);
+    assert_eq!(t.screen_text(), "abcd\nefgh\nxy");
+    assert_eq!((t.cursor.x, t.cursor.y), (2, 2));
+}
+
+#[test]
+fn conpty_prompt_input_survives_a_wider_window() {
+    // a prompt that wrapped while narrow, then the window widens
+    let mut t = term(6, 3, "out1\r\nout2\r\n\x1b]133;A\x07ps> long\x1b]133;B\x07");
+    t.conpty_layout = true;
+    feed(&mut t, "ls");
+    t.resize(20, 4);
+    assert_eq!(t.prompt_input().map(|i| i.text), Some("ls".to_string()));
+}
+
+#[test]
+fn conpty_resizes_during_an_app_rewrap_once_when_it_leaves() {
+    // ConPTY leaves the main screen alone while the app runs and re-wraps
+    // it once at the end: shrinking then growing must end up like one step
+    let text = "1\r\n2 two two\r\n3\r\n4 four four\r\n5\r\n6\r\nps> ";
+    let mut direct = term(12, 5, text);
+    direct.conpty_layout = true;
+    direct.resize(10, 6);
+    let mut stepped = term(12, 5, text);
+    stepped.conpty_layout = true;
+    feed(&mut stepped, "\x1b[?1049h\x1b[HAPP");
+    stepped.resize(4, 3);
+    stepped.resize(10, 6);
+    assert!(stepped.is_alt_screen());
+    assert!(stepped.screen_text().contains("APP"));
+    feed(&mut stepped, "\x1b[?1049l");
+    assert_eq!(stepped.screen_text(), direct.screen_text());
+    assert_eq!(stepped.total_lines(), direct.total_lines());
+    // the restored cursor keeps its saved place (see the next test)
+    assert_eq!((stepped.cursor.x, stepped.cursor.y), (4, 4));
+}
+
+#[test]
+fn conpty_keeps_the_saved_cursor_row_when_an_app_leaves() {
+    // widening during an app unwraps lines above the prompt; ConPTY puts
+    // the restored cursor back on its old row anyway (measured), leaving
+    // a gap, and its next prompt goes there
+    let mut t = term(6, 6, "abcdefgh\r\nijklmnop\r\nps> ");
+    t.conpty_layout = true;
+    assert_eq!(t.cursor.y, 4);
+    feed(&mut t, "\x1b[?1049h");
+    t.resize(12, 6);
+    feed(&mut t, "\x1b[?1049l");
+    assert_eq!(t.screen_text(), "abcdefgh\nijklmnop\nps>\n\n\n");
+    assert_eq!(t.cursor.y, 4, "the row it was saved on, not where the text moved");
+}
+
+#[test]
+fn conpty_layout_survives_a_full_reset() {
+    let mut t = term(5, 2, "x");
+    t.conpty_layout = true;
+    feed(&mut t, "\x1bc");
+    assert!(t.conpty_layout);
+}
+
 #[test]
 fn reflow_wide_chars_use_pad() {
     let mut t = term(6, 2, "ab日本");

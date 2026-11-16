@@ -35,6 +35,46 @@ pub enum TabHit {
 /// The classic bar's menus.
 pub const MENUS: [&str; 5] = ["Session", "Actions", "Edit", "View", "Help"];
 
+/// Which title bar Vibex draws (`config.title_bar`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BarKind {
+    /// Vibex's own: tabs in the title bar, Windows Terminal style.
+    #[default]
+    Tabs,
+    /// Kali's QTerminal: a centred title, round buttons and a menu bar.
+    Kali,
+    /// The Windows console: icon and title on the left, square buttons.
+    Windows,
+    /// GNOME Terminal's header bar: a centred bold title, round buttons.
+    Gnome,
+    /// macOS Terminal: traffic lights on the left, a centred title.
+    Mac,
+    /// tmux: a plain title bar; the windows are listed in the status line.
+    Tmux,
+}
+
+impl BarKind {
+    /// The config names (`config.title_bar`); "classic" is the Kali bar.
+    pub const NAMES: [&'static str; 6] = ["tabs", "classic", "windows", "gnome", "macos", "tmux"];
+
+    /// From `config.title_bar`.
+    pub fn from_name(name: &str) -> BarKind {
+        match name {
+            "classic" | "kali" => BarKind::Kali,
+            "windows" => BarKind::Windows,
+            "gnome" => BarKind::Gnome,
+            "macos" => BarKind::Mac,
+            "tmux" => BarKind::Tmux,
+            _ => BarKind::Tabs,
+        }
+    }
+
+    /// A tab strip under the title when there's more than one tab.
+    pub fn tabs_row(self) -> bool {
+        !matches!(self, BarKind::Tabs | BarKind::Tmux)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TabInfo {
     pub title: String,
@@ -65,10 +105,10 @@ pub struct TabBar {
     /// Text shown in the drag area (e.g. the active title when there is
     /// only one tab).
     pub caption: Option<String>,
-    /// The classic look: a centred title, round window buttons and a menu
-    /// bar, with tabs below only when there's more than one.
-    pub classic: bool,
-    /// The window's title (the classic bar shows it).
+    /// Which bar: Vibex's tabs, or one of the titled ones (a title row,
+    /// and tabs below only when there's more than one).
+    pub kind: BarKind,
+    /// The window's title (the titled bars show it).
     pub title: String,
     /// The classic bar's menu that's open.
     pub menu_open: Option<usize>,
@@ -100,7 +140,7 @@ pub fn height(cell_h: usize, scale: f32) -> f32 {
 /// width tabs from the left, then + and the new-tab menu button, a drag
 /// area, and the window buttons on the right.
 pub fn layout(bar: &TabBar, width: f32, cell_w: usize, cell_h: usize, scale: f32) -> TabBarLayout {
-    if bar.classic {
+    if bar.kind != BarKind::Tabs {
         return classic_layout(bar, width, cell_w, cell_h, scale);
     }
     let _ = cell_w;
@@ -147,14 +187,35 @@ const TABROW_H: f32 = 30.0;
 const DOT: f32 = 16.0;
 const DOT_GAP: f32 = 8.0;
 
-/// The classic bar's three rows at `scale`: title, menus, tabs (0 when
-/// there's one tab).
+/// The classic (Kali) bar's three rows at `scale`: title, menus, tabs (0
+/// when there's one tab).
 pub fn classic_rows(cell_h: usize, scale: f32, tabs_row: bool) -> (f32, f32, f32) {
+    kind_rows(BarKind::Kali, cell_h, scale, tabs_row)
+}
+
+/// The rows of `kind`'s bar: title, menus (Kali only), tabs (with more
+/// than one tab, never for tmux).
+pub fn kind_rows(kind: BarKind, cell_h: usize, scale: f32, more_tabs: bool) -> (f32, f32, f32) {
     let s = scale.max(0.5);
-    let title = (TITLE_H * s).round().max((cell_h + 8) as f32);
-    let menu = (MENU_H * s).round().max((cell_h + 4) as f32);
-    let tabs = if tabs_row { (TABROW_H * s).round().max((cell_h + 8) as f32) } else { 0.0 };
+    let title_h = match kind {
+        BarKind::Gnome => 46.0,
+        BarKind::Mac => 28.0,
+        BarKind::Windows | BarKind::Tmux => 31.0,
+        _ => TITLE_H,
+    };
+    let title = (title_h * s).round().max((cell_h + 8) as f32);
+    let menu = if kind == BarKind::Kali { (MENU_H * s).round().max((cell_h + 4) as f32) } else { 0.0 };
+    let tabs = if more_tabs && kind.tabs_row() { (TABROW_H * s).round().max((cell_h + 8) as f32) } else { 0.0 };
     (title, menu, tabs)
+}
+
+/// The height of `kind`'s bar (for Tabs, the tab strip).
+pub fn kind_height(kind: BarKind, cell_h: usize, scale: f32, more_tabs: bool) -> f32 {
+    if kind == BarKind::Tabs {
+        return height(cell_h, scale.max(0.5));
+    }
+    let (a, b, c) = kind_rows(kind, cell_h, scale, more_tabs);
+    a + b + c
 }
 
 /// The classic bar's height.
@@ -170,23 +231,52 @@ fn label_w(text: &str, s: f32) -> f32 {
 
 fn classic_layout(bar: &TabBar, width: f32, _cell_w: usize, cell_h: usize, scale: f32) -> TabBarLayout {
     let s = scale.max(0.5);
-    let (th, mh, tabs_h) = classic_rows(cell_h, s, bar.tabs.len() > 1);
+    let (th, mh, tabs_h) = kind_rows(bar.kind, cell_h, s, bar.tabs.len() > 1);
     let mut regions = Vec::new();
-    // window buttons: dots on the right of the title row
     if bar.window_buttons {
-        let d = (DOT * s).round();
-        let gap = (DOT_GAP * s).round();
-        let hit = (d + gap).round();
-        let mut x = width - (10.0 * s).round() - d;
-        for h in [TabHit::Close, TabHit::Maximize, TabHit::Minimize] {
-            let cx = x + d / 2.0;
-            regions.push((PxRect { x: (cx - hit / 2.0).round(), y: 0.0, w: hit, h: th }, h));
-            x -= d + gap;
+        match bar.kind {
+            // the Windows console: square caption buttons, full height
+            BarKind::Windows | BarKind::Tmux => {
+                let bw = (BUTTON_W * s).round();
+                let bx = width - bw * 3.0;
+                for (i, hit) in [TabHit::Minimize, TabHit::Maximize, TabHit::Close].into_iter().enumerate() {
+                    regions.push((PxRect { x: bx + bw * i as f32, y: 0.0, w: bw, h: th }, hit));
+                }
+            }
+            // macOS: close, minimise and zoom from the left
+            BarKind::Mac => {
+                let d = (12.0 * s).round();
+                let step = (20.0 * s).round();
+                let mut x = (13.0 * s).round();
+                for hit in [TabHit::Close, TabHit::Minimize, TabHit::Maximize] {
+                    regions.push((PxRect { x: x - (4.0 * s).round(), y: 0.0, w: d + (8.0 * s).round(), h: th }, hit));
+                    x += step;
+                }
+            }
+            // round buttons on the right: Kali's small dots, GNOME's
+            // bigger flat circles
+            _ => {
+                let (d, gap, edge) = if bar.kind == BarKind::Gnome { (24.0, 12.0, 12.0) } else { (DOT, DOT_GAP, 10.0) };
+                let d = (d * s).round();
+                let gap = (gap * s).round();
+                let hit = (d + gap).round();
+                let mut x = width - (edge * s).round() - d;
+                for h in [TabHit::Close, TabHit::Maximize, TabHit::Minimize] {
+                    let cx = x + d / 2.0;
+                    regions.push((PxRect { x: (cx - hit / 2.0).round(), y: 0.0, w: hit, h: th }, h));
+                    x -= d + gap;
+                }
+            }
         }
     }
-    // the menu bar
+    // GNOME's header bar has the new-tab button on the left
+    if bar.kind == BarKind::Gnome {
+        let d = (34.0 * s).round();
+        regions.push((PxRect { x: (8.0 * s).round(), y: ((th - d) / 2.0).round(), w: d, h: d }, TabHit::NewTab));
+    }
+    // the menu bar (Kali)
     let mut x = (3.0 * s).round();
-    for (i, m) in MENUS.iter().enumerate() {
+    for (i, m) in MENUS.iter().enumerate().filter(|_| mh > 0.0) {
         let w = label_w(m, s);
         regions.push((PxRect { x, y: th + (2.0 * s).round(), w, h: mh - (4.0 * s).round() }, TabHit::Menu(i)));
         x += w;
@@ -205,7 +295,9 @@ fn classic_layout(bar: &TabBar, width: f32, _cell_w: usize, cell_h: usize, scale
             regions.push((r, TabHit::Tab(i)));
             x += tab_w;
         }
-        regions.push((PxRect { x: x + (4.0 * s).round(), y: y + 3.0 * s, w: (NEW_TAB_W * s).round(), h: tabs_h - 6.0 * s }, TabHit::NewTab));
+        if bar.kind != BarKind::Gnome {
+            regions.push((PxRect { x: x + (4.0 * s).round(), y: y + 3.0 * s, w: (NEW_TAB_W * s).round(), h: tabs_h - 6.0 * s }, TabHit::NewTab));
+        }
     }
     TabBarLayout { height: th + mh + tabs_h, regions }
 }
@@ -237,7 +329,7 @@ mod tests {
             maximized: false,
             hover: None,
             caption: None,
-            classic: false,
+            kind: BarKind::Tabs,
             title: String::new(),
             menu_open: None,
         }
@@ -246,7 +338,7 @@ mod tests {
     #[test]
     fn classic_bar() {
         let mut b = bar(1);
-        b.classic = true;
+        b.kind = BarKind::Kali;
         let l = layout(&b, 1000.0, 9, 19, 1.0);
         // title + menus, no tabs row with one tab
         assert_eq!(l.height, 56.0);
@@ -258,12 +350,46 @@ mod tests {
         assert!(l.rect(TabHit::Menu(4)).unwrap().x > session.x);
         // a second tab brings the tabs row
         let mut b = bar(2);
-        b.classic = true;
+        b.kind = BarKind::Kali;
         let l = layout(&b, 1000.0, 9, 19, 1.0);
         assert_eq!(l.height, 86.0);
         let t1 = l.rect(TabHit::Tab(1)).unwrap();
         assert!(t1.y >= 56.0);
         assert_eq!(classic_height(19, 1.0, true), 86.0);
+    }
+
+    #[test]
+    fn every_titled_bar() {
+        for kind in [BarKind::Windows, BarKind::Gnome, BarKind::Mac, BarKind::Tmux] {
+            let mut b = bar(1);
+            b.kind = kind;
+            let one = layout(&b, 1000.0, 9, 19, 1.0);
+            // one tab: no tab strip, no menus; the window buttons answer
+            assert!(one.rect(TabHit::Tab(0)).is_none(), "{kind:?}");
+            assert!(one.rect(TabHit::Menu(0)).is_none(), "{kind:?}");
+            for hit in [TabHit::Minimize, TabHit::Maximize, TabHit::Close] {
+                let r = one.rect(hit).unwrap_or_else(|| panic!("{kind:?} {hit:?}"));
+                assert_eq!(one.hit(r.x + r.w / 2.0, r.y + r.h / 2.0), Some(hit), "{kind:?}");
+                assert!(r.x >= 0.0 && r.x + r.w <= 1000.0);
+            }
+            assert_eq!(one.height, kind_height(kind, 19, 1.0, false));
+            // two tabs: a tab strip below, except tmux (its status line has them)
+            let mut b = bar(2);
+            b.kind = kind;
+            let two = layout(&b, 1000.0, 9, 19, 1.0);
+            assert_eq!(two.rect(TabHit::Tab(1)).is_some(), kind != BarKind::Tmux, "{kind:?}");
+            assert_eq!(two.height, kind_height(kind, 19, 1.0, true));
+        }
+        // the buttons sit where each system puts them
+        let mut b = bar(1);
+        b.kind = BarKind::Mac;
+        let mac = layout(&b, 1000.0, 9, 19, 1.0);
+        assert!(mac.rect(TabHit::Close).unwrap().x < 40.0, "traffic lights on the left");
+        b.kind = BarKind::Windows;
+        let win = layout(&b, 1000.0, 9, 19, 1.0);
+        assert_eq!(win.hit(999.0, 5.0), Some(TabHit::Close));
+        assert_eq!(BarKind::from_name("classic"), BarKind::Kali);
+        assert!(BarKind::NAMES.iter().all(|n| *n == "tabs" || BarKind::from_name(n) != BarKind::Tabs));
     }
 
     #[test]

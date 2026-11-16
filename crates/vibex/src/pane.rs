@@ -119,9 +119,11 @@ impl TypedLine {
                     self.esc = match ch {
                         '[' | 'O' => 2,
                         ']' | 'P' | '_' => 3,
-                        // a lone Esc (PowerShell: clear the line), or Alt+key
+                        // Alt+key (Esc and the key in one write): the shell
+                        // may do anything with it (Alt+D deletes a word)
                         _ => {
                             self.text.clear();
+                            self.edited = true;
                             0
                         }
                     };
@@ -162,6 +164,13 @@ impl TypedLine {
                 c if !c.is_control() && self.text.len() < MAX => self.text.push(c),
                 _ => {}
             }
+        }
+        // A lone Esc (a write of its own; PowerShell clears the line). Left
+        // pending, it would swallow the first key typed next, and the
+        // risky-command check would see `it push --force`.
+        if self.esc == 1 {
+            self.esc = 0;
+            self.text.clear();
         }
     }
 }
@@ -234,6 +243,8 @@ impl Pane {
     pub fn spawn(id: PaneId, profile: &str, cmd: &Command, cols: usize, rows: usize, opts: &PaneOptions, waker: impl Waker) -> Result<Pane, String> {
         let mut term = Terminal::new(cols, rows);
         term.set_scrollback_limit(opts.scrollback);
+        // the shell runs behind ConPTY: lay out resizes the way it does
+        term.conpty_layout = cfg!(windows);
         term.modes.cursor_blink = opts.cursor_blink;
         term.cursor_shape = opts.cursor_shape;
         let (tx, rx) = mpsc::channel();
@@ -715,7 +726,9 @@ mod tests {
         assert_eq!(line(&[b"ls\rgit push -f"]).as_deref(), Some("git push -f"));
         assert_eq!(line(&[b"echo hi\x03git"]).as_deref(), Some("git"));
         assert_eq!(line(&[b"abc\x15rm -rf ~"]).as_deref(), Some("rm -rf ~"));
-        assert_eq!(line(&[b"abc\x1bx"]).as_deref(), Some(""));
+        assert_eq!(line(&[b"abc", b"\x1b", b"git push --force"]).as_deref(), Some("git push --force"));
+        // Alt+key: the shell may have changed the line
+        assert_eq!(line(&[b"abc\x1bd"]), None);
         // a paste, bracketed, counts as typing
         assert_eq!(line(&[b"\x1b[200~terraform destroy\x1b[201~"]).as_deref(), Some("terraform destroy"));
         // replies to the terminal's queries are skipped

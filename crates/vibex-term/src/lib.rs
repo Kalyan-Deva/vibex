@@ -161,6 +161,20 @@ pub struct Terminal {
     /// back onto the screen.
     history_fence: usize,
     epoch: u64,
+    /// Lay the screen out the way ConPTY's console host does after a
+    /// resize. ConPTY keeps its own copy of the screen, re-wraps it itself
+    /// and sends no repaint, so its later absolute cursor moves assume the
+    /// two agree row for row. Its copy has no history: growing adds blank
+    /// rows at the bottom (nothing comes back from history), and a re-wrap
+    /// keeps the old top row on top. Off: xterm-style, history fills the
+    /// screen from above.
+    pub conpty_layout: bool,
+    /// With `conpty_layout`, the main screen's size while a full-screen app
+    /// has the alternate screen and the window was resized: ConPTY re-wraps
+    /// the main screen once, from this size, when the app leaves (shrinking
+    /// then growing doesn't round-trip, so re-wrapping each step would not
+    /// match it).
+    primary_size: Option<(usize, usize)>,
     /// Image placements on rows, oldest first, with what each costs.
     placed: std::collections::VecDeque<(u64, usize)>,
     placed_bytes: usize,
@@ -224,6 +238,8 @@ impl Terminal {
             evicted: 0,
             history_fence: 0,
             epoch: 0,
+            conpty_layout: false,
+            primary_size: None,
             placed: std::collections::VecDeque::new(),
             placed_bytes: 0,
         }
@@ -597,6 +613,21 @@ impl Terminal {
 
         // a wrap pending at the cursor after re-wrapping (primary screen)
         let mut pending = false;
+        if self.conpty_layout && self.alt_active {
+            // only the app's screen changes now; the main screen is
+            // re-wrapped once when the app leaves (see `primary_size`)
+            self.primary_size.get_or_insert((self.cols, self.rows));
+            resize_plain(&mut self.alternate, cols, rows, &mut self.cursor.y);
+            self.cols = cols;
+            self.rows = rows;
+            self.scroll_top = 0;
+            self.scroll_bottom = rows - 1;
+            self.tabs = default_tabs(cols);
+            self.cursor.x = self.cursor.x.min(cols - 1);
+            self.cursor.y = self.cursor.y.min(rows - 1);
+            self.wrap_pending = false;
+            return;
+        }
         if cols != self.cols {
             // Width change: re-wrap the primary screen + history; the
             // alternate screen (full-screen apps) just gets cropped/padded,
@@ -662,7 +693,8 @@ impl Terminal {
         } else if rows > self.rows {
             let extra = rows - self.rows;
             let mut pulled = 0;
-            if !self.alt_active {
+            // (ConPTY adds blank rows below instead: see `conpty_layout`)
+            if !self.alt_active && !self.conpty_layout {
                 while pulled < extra && self.scrollback.len() > self.history_fence {
                     match self.scrollback.pop_back() {
                         Some(mut row) => {
@@ -1253,9 +1285,46 @@ impl Terminal {
         }
         self.alt_active = false;
         self.last_cell = None;
+        if let Some((old_cols, old_rows)) = self.primary_size.take() {
+            if (old_cols, old_rows) != (self.cols, self.rows) {
+                self.reflow_deferred_primary();
+            }
+        }
         if restore_cursor {
             self.restore_cursor();
         }
+    }
+
+    /// The window was resized while a full-screen app had the alternate
+    /// screen: bring the main screen (still at its old size) to the current
+    /// one in a single re-wrap, as ConPTY does.
+    fn reflow_deferred_primary(&mut self) {
+        let (cols, rows) = (self.cols, self.rows);
+        let cursor = match &self.saved_primary {
+            Some(s) => (s.cursor.x + s.wrap_pending as usize, s.cursor.y),
+            None => (self.cursor.x + self.wrap_pending as usize, self.cursor.y),
+        };
+        let (x, y, wrap) = self.reflow_primary(cols, rows, cursor);
+        match self.saved_primary.as_mut() {
+            Some(s) => {
+                // ConPTY restores the saved cursor where it was (clamped to
+                // the new screen), not where the re-wrap moved its text:
+                // the next prompt goes there, so it must here too
+                s.cursor.x = cursor.0.min(cols - 1);
+                s.cursor.y = cursor.1.min(rows - 1);
+                s.wrap_pending = false;
+                let _ = (x, y, wrap);
+            }
+            None => {
+                self.cursor.x = x;
+                self.cursor.y = y;
+                self.wrap_pending = wrap;
+            }
+        }
+        for row in self.primary.iter_mut() {
+            row.resize(cols);
+        }
+        self.display_offset = self.display_offset.min(self.scrollback.len());
     }
 
     pub(crate) fn repeat_last(&mut self, n: usize) {
@@ -1304,9 +1373,10 @@ impl Terminal {
         // what the app owns, not the program: the cell size, the line
         // numbering (history is gone: those lines count as evicted) and the
         // redraw counter
-        let (cell_px, generation) = (self.cell_px, self.generation);
+        let (cell_px, generation, conpty_layout) = (self.cell_px, self.generation, self.conpty_layout);
         let (evicted, epoch) = (self.evicted + self.scrollback.len() as u64, self.epoch.wrapping_add(1));
         *self = Terminal::new(cols, rows);
+        self.conpty_layout = conpty_layout;
         self.scrollback_limit = limit;
         self.title = title;
         self.responses = responses;

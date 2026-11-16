@@ -83,7 +83,15 @@ pub enum Field {
 }
 
 /// The styles as the dropdown shows them: (shown, style).
-pub const STYLE_NAMES: &[(&str, &str)] = &[("Vibex", "vibex"), ("Dragon (Kali Linux)", "dragon")];
+pub const STYLE_NAMES: &[(&str, &str)] = &[
+    ("Vibex", "vibex"),
+    ("Dragon (Kali Linux)", "dragon"),
+    ("Windows Command Prompt", "cmd"),
+    ("Windows PowerShell", "powershell"),
+    ("GNOME Terminal (Ubuntu)", "gnome"),
+    ("macOS Terminal", "macos"),
+    ("tmux", "tmux"),
+];
 
 fn style_label(style: Option<&str>) -> String {
     match style {
@@ -93,13 +101,17 @@ fn style_label(style: Option<&str>) -> String {
 }
 
 /// String options and their values: (key, [(shown, stored)]).
-pub const CHOICES: &[(&str, &[(&str, &str)])] =
-    &[("prompt", &[("Shell's own", "default"), ("Dragon (Kali)", "dragon")]), ("title_bar", &[("Tabs", "tabs"), ("Classic (Kali)", "classic")])];
+pub const CHOICES: &[(&str, &[(&str, &str)])] = &[
+    ("prompt", &[("Shell's own", "default"), ("Dragon (Kali)", "dragon"), ("Command Prompt (C:\\>)", "cmd"), ("Ubuntu", "ubuntu"), ("macOS", "macos")]),
+    ("title_bar", &[("Tabs", "tabs"), ("Classic (Kali)", "classic"), ("Windows", "windows"), ("GNOME", "gnome"), ("macOS", "macos"), ("tmux", "tmux")]),
+    ("status_style", &[("Vibex", "vibex"), ("tmux", "tmux")]),
+];
 
 fn choice_value(cfg: &Config, key: &str) -> String {
     match key {
         "prompt" => cfg.prompt.clone(),
         "title_bar" => cfg.title_bar.clone(),
+        "status_style" => cfg.status_style.clone(),
         _ => String::new(),
     }
 }
@@ -401,11 +413,16 @@ impl SettingsUi {
                 push!(
                     Field::Pick("title_bar"),
                     SettingRow::new("Title bar", Control::Choice(choice_label(cfg, "title_bar")))
-                        .detail("Tabs up top (Windows Terminal), or a title and menu bar with tabs only when there are two or more (Kali's QTerminal)"),
+                        .detail("Tabs up top (Windows Terminal), or a title with tabs below when there are two or more: Kali, Windows, GNOME, macOS or tmux"),
                 );
                 push!(Field::Padding, SettingRow::new("Padding", Control::Choice(format!("{} px", cfg.padding.0))).detail("Space around the text"));
                 let (f, r) = toggle("Status bar", "Profile, folder and exit code along the bottom", "status_bar");
                 push!(f, r);
+                push!(
+                    Field::Pick("status_style"),
+                    SettingRow::new("Status line", Control::Choice(choice_label(cfg, "status_style")))
+                        .detail("Vibex's, or tmux's green line: session, window list, title and clock"),
+                );
                 let (f, r) = toggle("Dim inactive panes", "Fade splits that don't have focus", "dim_inactive_panes");
                 push!(f, r);
                 push!(Field::Header, header("Cursor"));
@@ -437,7 +454,7 @@ impl SettingsUi {
                 push!(
                     Field::Pick("prompt"),
                     SettingRow::new("Prompt", Control::Choice(choice_label(cfg, "prompt")))
-                        .detail("Dragon: Kali Linux's two-line user@host prompt and its ls, in PowerShell and WSL (new tabs)"),
+                        .detail("Kali's two-line prompt (and its ls), cmd's C:\\path>, Ubuntu's user@host:~$ or macOS's user@host dir %, in PowerShell and WSL (new tabs)"),
                 );
                 let rc = if cfg.right_click_menu { "Menu" } else { "Copy / paste" };
                 push!(

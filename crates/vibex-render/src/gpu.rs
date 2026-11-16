@@ -140,6 +140,9 @@ pub struct GpuRenderer {
     reconfigure: bool,
     /// Set by wgpu when the device is gone (driver reset, GPU switch).
     lost: Arc<AtomicBool>,
+    /// Frames in a row that couldn't get a surface texture: a device that
+    /// is gone without saying so.
+    failed_frames: u32,
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     layout: wgpu::BindGroupLayout,
@@ -177,6 +180,19 @@ impl GpuRenderer {
         height: u32,
         want_transparency: bool,
     ) -> Result<Self, String> {
+        Self::new_on(target, width, height, want_transparency, false)
+    }
+
+    /// Like `new`; `software` asks for the system's software adapter
+    /// (WARP on Windows): slower, but it presents through the same kind of
+    /// swapchain, so it can take over a window whose GPU device was lost.
+    pub fn new_on(
+        target: impl Into<wgpu::SurfaceTarget<'static>> + Clone + Send + Sync + 'static,
+        width: u32,
+        height: u32,
+        want_transparency: bool,
+        software: bool,
+    ) -> Result<Self, String> {
         let mut backend_options = wgpu::BackendOptions::default();
         if want_transparency {
             backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
@@ -192,7 +208,7 @@ impl GpuRenderer {
         let surface = instance.create_surface(target).map_err(|e| e.to_string())?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
+            force_fallback_adapter: software,
             compatible_surface: Some(&surface),
             apply_limit_buckets: false,
         }))
@@ -401,6 +417,7 @@ impl GpuRenderer {
             config,
             reconfigure: false,
             lost,
+            failed_frames: 0,
             pipeline,
             bind_group,
             layout,
@@ -455,8 +472,30 @@ impl GpuRenderer {
         self.lost.load(Ordering::Relaxed)
     }
 
+    /// One more frame without a surface texture; after `limit` in a row,
+    /// call the device lost so the app falls back to the CPU renderer.
+    fn frame_failed(&mut self, limit: u32) {
+        self.failed_frames += 1;
+        if self.failed_frames >= limit && !self.device_lost() {
+            eprintln!("vibex: no GPU frame for {limit} tries: treating the device as lost");
+            self.lost.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Testing only: throw the device away, as a driver reset would, to
+    /// exercise the fallback (`VIBEX_DEBUG_LOSE_GPU`).
+    pub fn debug_lose_device(&self) {
+        self.device.destroy();
+    }
+
     /// Replace a lost surface (drop the old one first: the window can only
     /// have one swapchain).
+    /// Let go of the window's surface, so a new renderer can make its own
+    /// (a window takes only one swapchain).
+    pub fn release_surface(&mut self) {
+        self.surface = None;
+    }
+
     fn recreate_surface(&mut self) {
         self.surface = None;
         self.surface = (self.make_surface)();
@@ -731,6 +770,9 @@ impl GpuRenderer {
 
     /// Draw a frame. `opacity` applies to the default background only.
     pub fn render(&mut self, scene: &Scene, fonts: &mut FontSet, opacity: f32) {
+        // wgpu reports a lost device from poll(): without it the callback
+        // never runs, every frame fails quietly and the window freezes
+        let _ = self.device.poll(wgpu::PollType::Poll);
         if self.device_lost() {
             return;
         }
@@ -758,8 +800,12 @@ impl GpuRenderer {
             }
         };
 
+        // this many frames in a row with no surface: the device is gone
+        // even if wgpu hasn't said so (the window would stay frozen)
+        const GIVE_UP: u32 = 60;
         let Some(surface) = &self.surface else {
             self.recreate_surface();
+            self.frame_failed(GIVE_UP);
             return;
         };
         let frame = match surface.get_current_texture() {
@@ -768,16 +814,24 @@ impl GpuRenderer {
                 self.reconfigure = true;
                 t
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Validation => return,
+            // minimised or hidden: nothing is wrong
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Validation => {
+                self.frame_failed(GIVE_UP);
+                return;
+            }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(&self.device, &self.config);
+                self.frame_failed(GIVE_UP);
                 return;
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 self.recreate_surface();
+                self.frame_failed(GIVE_UP);
                 return;
             }
         };
+        self.failed_frames = 0;
 
         let scene_total = instances.len() as u32;
         let (sw, sh) = (self.config.width as f32, self.config.height as f32);

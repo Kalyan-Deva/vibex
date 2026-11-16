@@ -95,6 +95,9 @@ const OLD: &str = ".vibex-old";
 /// %LOCALAPPDATA%\Programs\Vibex. No fallback: a shared folder such as
 /// C:\Users\Public would let other accounts swap the exe.
 fn install_dir() -> Result<PathBuf, String> {
+    if let Some(sb) = sandbox() {
+        return Ok(sb.join("Programs").join("Vibex"));
+    }
     match std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
         Some(base) if base.is_absolute() => Ok(base.join("Programs").join("Vibex")),
         _ => Err("%LOCALAPPDATA% is not set, so there is no per-user Programs folder to install into.".into()),
@@ -105,7 +108,20 @@ fn system32(rel: &str) -> PathBuf {
     std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows")).join("System32").join(rel)
 }
 
+/// Testing the whole install / update / uninstall cycle without touching
+/// the real install: with `VIBEX_SETUP_SANDBOX=<absolute folder>`, files
+/// and the Start menu shortcut go under that folder, and every registry
+/// write (uninstall entry, PATH, App Paths, Explorer verbs) under
+/// `HKCU\Software\VibexSandbox\...` instead of the real keys.
+fn sandbox() -> Option<PathBuf> {
+    std::env::var_os("VIBEX_SETUP_SANDBOX").map(PathBuf::from).filter(|p| p.is_absolute())
+}
+
 fn start_menu_lnk() -> Option<PathBuf> {
+    if let Some(sb) = sandbox() {
+        let _ = std::fs::create_dir_all(sb.join("Start Menu"));
+        return Some(sb.join("Start Menu").join("Vibex.lnk"));
+    }
     let appdata = std::env::var_os("APPDATA")?;
     Some(Path::new(&appdata).join(r"Microsoft\Windows\Start Menu\Programs\Vibex.lnk"))
 }
@@ -152,8 +168,19 @@ mod reg {
         s.encode_utf16().chain(Some(0)).collect()
     }
 
+    /// The key actually used: the same path under a scratch key in a
+    /// sandboxed test run (see `sandbox`).
+    fn at(path: &str) -> String {
+        if super::sandbox().is_some() {
+            format!(r"Software\VibexSandbox\{path}")
+        } else {
+            path.to_string()
+        }
+    }
+
     fn open(path: &str) -> Result<HKEY, String> {
         let mut key: HKEY = null_mut();
+        let path = &at(path);
         let p = w(path);
         let r = unsafe { RegCreateKeyExW(HKEY_CURRENT_USER, p.as_ptr(), 0, null(), REG_OPTION_NON_VOLATILE, KEY_WRITE, null(), &mut key, null_mut()) };
         if r != ERROR_SUCCESS {
@@ -195,6 +222,7 @@ mod reg {
     /// expanding %VARS%. `Ok(None)`: no such value. Any other failure is an
     /// error, so a caller never mistakes "couldn't read" for "empty".
     pub fn get_string(path: &str, name: &str) -> Result<Option<(String, u32)>, String> {
+        let path = &at(path);
         let (p, n) = (w(path), w(name));
         let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
         let failed = |r: u32| format!("cannot read HKCU\\{path}\\{name} (error {r})");
@@ -225,6 +253,7 @@ mod reg {
     }
 
     pub fn delete_tree(path: &str) {
+        let path = &at(path);
         let p = w(path);
         unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, p.as_ptr()) };
         // RegDeleteTreeW removes the subtree's contents; remove the key too
@@ -251,6 +280,9 @@ mod reg {
 
 #[cfg(windows)]
 fn broadcast_changes() {
+    if sandbox().is_some() {
+        return; // nothing real changed
+    }
     use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
     use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE};
     let env: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();

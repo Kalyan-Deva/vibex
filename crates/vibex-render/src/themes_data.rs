@@ -1,7 +1,8 @@
 //! Popular colour schemes, from the iTerm2-Color-Schemes collection
 //! (github.com/mbadolato/iTerm2-Color-Schemes, MIT; each scheme is its
 //! authors' work), Solarized from Ethan Schoonover's palette and
-//! Campbell from Windows Terminal (microsoft/terminal, MIT).
+//! Campbell and Campbell PowerShell from Windows Terminal (microsoft/terminal,
+//! MIT), and xterm's own default palette.
 //! Generated: keep entries sorted by name.
 
 /// id, display name, background, foreground, cursor, selection, ANSI 0-15.
@@ -56,6 +57,18 @@ pub(crate) const SCHEMES: &[Scheme] = &[
         id: "campbell",
         name: "Campbell",
         background: 0x0c0c0c,
+        foreground: 0xcccccc,
+        cursor: 0xffffff,
+        selection: 0x494949,
+        palette: [
+            0x0c0c0c, 0xc50f1f, 0x13a10e, 0xc19c00, 0x0037da, 0x881798, 0x3a96dd, 0xcccccc, 0x767676, 0xe74856, 0x16c60c, 0xf9f1a5, 0x3b78ff, 0xb4009e,
+            0x61d6d6, 0xf2f2f2,
+        ],
+    },
+    Scheme {
+        id: "campbell-powershell",
+        name: "Campbell PowerShell",
+        background: 0x012456,
         foreground: 0xcccccc,
         cursor: 0xffffff,
         selection: 0x494949,
@@ -557,6 +570,18 @@ pub(crate) const SCHEMES: &[Scheme] = &[
         ],
     },
     Scheme {
+        id: "terminal-basic",
+        name: "Terminal Basic",
+        background: 0xffffff,
+        foreground: 0x000000,
+        cursor: 0x7f7f7f,
+        selection: 0xa4c9ff,
+        palette: [
+            0x000000, 0x990000, 0x00a600, 0x999900, 0x0000b2, 0xb200b2, 0x00a6b2, 0xbfbfbf, 0x666666, 0xe50000, 0x00d900, 0xbfbf00, 0x0000ff, 0xe500e5,
+            0x00d8d8, 0xe5e5e5,
+        ],
+    },
+    Scheme {
         id: "tokyo-night-day",
         name: "Tokyo Night Day",
         background: 0xe1e2e7,
@@ -602,6 +627,30 @@ pub(crate) const SCHEMES: &[Scheme] = &[
         palette: [
             0x000000, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xffffff, 0x4c4c4c, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb,
             0x8abeb7, 0xffffff,
+        ],
+    },
+    Scheme {
+        id: "ubuntu",
+        name: "Ubuntu",
+        background: 0x300a24,
+        foreground: 0xeeeeec,
+        cursor: 0xbbbbbb,
+        selection: 0xb5d5ff,
+        palette: [
+            0x2e3436, 0xcc0000, 0x4e9a06, 0xc4a000, 0x3465a4, 0x75507b, 0x06989a, 0xd3d7cf, 0x555753, 0xef2929, 0x8ae234, 0xfce94f, 0x729fcf, 0xad7fa8,
+            0x34e2e2, 0xeeeeec,
+        ],
+    },
+    Scheme {
+        id: "xterm",
+        name: "xterm",
+        background: 0x000000,
+        foreground: 0xe5e5e5,
+        cursor: 0xe5e5e5,
+        selection: 0x4d4d4d,
+        palette: [
+            0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5, 0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff,
+            0x00ffff, 0xffffff,
         ],
     },
     Scheme {

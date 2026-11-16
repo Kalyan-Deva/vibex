@@ -57,6 +57,8 @@ pub struct Snapshot {
     pub pane_count: usize,
     pub cwd: String,
     pub last_exit: Option<i32>,
+    /// Every tab's title, in order (the tmux status line lists them).
+    pub tab_titles: Vec<String>,
 }
 
 pub enum EventArg {
@@ -564,16 +566,25 @@ impl Engine {
                 "dim_inactive_panes" => c.dim_inactive_panes = boolean(&v).map_err(ctx)?,
                 "glass" => c.glass = boolean(&v).map_err(ctx)?,
                 "prompt" => {
-                    c.prompt = match string(&v).map_err(ctx)?.as_str() {
-                        p @ ("default" | "dragon") => p.to_string(),
-                        other => return Err(format!("config.prompt: \"{other}\" (use \"default\" or \"dragon\")")),
+                    let p = string(&v).map_err(ctx)?;
+                    if !crate::config::PROMPTS.contains(&p.as_str()) {
+                        return Err(format!("config.prompt: \"{p}\" (use one of: {})", crate::config::PROMPTS.join(", ")));
                     }
+                    c.prompt = p;
                 }
                 "title_bar" => {
-                    c.title_bar = match string(&v).map_err(ctx)?.as_str() {
-                        t @ ("tabs" | "classic") => t.to_string(),
-                        other => return Err(format!("config.title_bar: \"{other}\" (use \"tabs\" or \"classic\")")),
+                    let t = string(&v).map_err(ctx)?;
+                    if !vibex_render::BarKind::NAMES.contains(&t.as_str()) {
+                        return Err(format!("config.title_bar: \"{t}\" (use one of: {})", vibex_render::BarKind::NAMES.join(", ")));
                     }
+                    c.title_bar = t;
+                }
+                "status_style" => {
+                    let t = string(&v).map_err(ctx)?;
+                    if !crate::config::STATUS_STYLES.contains(&t.as_str()) {
+                        return Err(format!("config.status_style: \"{t}\" (use one of: {})", crate::config::STATUS_STYLES.join(", ")));
+                    }
+                    c.status_style = t;
                 }
                 "right_click" => {
                     c.right_click_menu = match string(&v).map_err(ctx)?.as_str() {
@@ -602,8 +613,16 @@ impl Engine {
                     c.update_feed = url;
                 }
                 "check_updates" => c.check_updates = boolean(&v).map_err(ctx)?,
+                // applied below, once the theme (in any order) is known
+                "readable_colors" => {
+                    boolean(&v).map_err(ctx)?;
+                }
                 other => return Err(format!("unknown option config.{other}")),
             }
+        }
+        // readable_colors = false: every colour exactly as the theme says
+        if let Ok(Value::Boolean(b)) = t.get::<Value>("readable_colors") {
+            c.theme.readable = b;
         }
         if c.profile(&c.default_profile).is_none() {
             return Err(format!(
@@ -884,7 +903,10 @@ pub fn parse_theme(v: &Value) -> Result<Theme, String> {
             })
         }
         Value::Table(t) => {
-            check_keys(t, &["base", "foreground", "background", "cursor", "cursor_text", "selection", "search_match", "ansi", "brights", "bold_is_bright"])?;
+            check_keys(
+                t,
+                &["base", "foreground", "background", "cursor", "cursor_text", "selection", "search_match", "ansi", "brights", "bold_is_bright", "readable"],
+            )?;
             let mut theme = match field(t, "base") {
                 Value::Nil => Theme::default(),
                 b => parse_theme(&b)?,
@@ -914,6 +936,10 @@ pub fn parse_theme(v: &Value) -> Result<Theme, String> {
             }
             if let Value::Boolean(b) = field(t, "bold_is_bright") {
                 theme.bold_is_bright = b;
+            }
+            // false: every colour exactly as given, even if text can't be read
+            if let Value::Boolean(b) = field(t, "readable") {
+                theme.readable = b;
             }
             Ok(theme)
         }
@@ -1196,9 +1222,14 @@ fn parse_segments(v: &Value) -> Result<Vec<StatusSegment>, String> {
 fn parse_status(v: &Value) -> Result<StatusLine, String> {
     match v {
         Value::Table(t) if !matches!(field(t, "left"), Value::Nil) || !matches!(field(t, "right"), Value::Nil) => {
-            Ok(StatusLine { left: parse_segments(&field(t, "left"))?, right: parse_segments(&field(t, "right"))? })
+            // `background = "#00aa00"` colours the whole line (a tmux look)
+            let background = match field(t, "background") {
+                Value::Nil => None,
+                v => Some(color(&v).map_err(|e| format!("background: {e}"))?),
+            };
+            Ok(StatusLine { left: parse_segments(&field(t, "left"))?, right: parse_segments(&field(t, "right"))?, background })
         }
-        other => Ok(StatusLine { left: parse_segments(other)?, right: Vec::new() }),
+        other => Ok(StatusLine { left: parse_segments(other)?, right: Vec::new(), background: None }),
     }
 }
 
@@ -1510,6 +1541,17 @@ mod tests {
         assert!(matches!(cmds.as_slice(), [Cmd::Toast(m, _)] if m == "hi"));
         let e = load_src("while true do end").err().unwrap();
         assert_eq!(e, TIMEOUT_LOAD);
+    }
+
+    #[test]
+    fn readable_colors_can_be_turned_off() {
+        let (_, c) = load_src(r#"return { theme = "solarized-dark" }"#).unwrap();
+        assert!(c.theme.readable, "on by default");
+        let (_, c) = load_src(r#"return { readable_colors = false, theme = "solarized-dark" }"#).unwrap();
+        assert!(!c.theme.readable, "whatever order the keys come in");
+        let (_, c) = load_src(r#"return { theme = { base = "ayu-dark", readable = false } }"#).unwrap();
+        assert!(!c.theme.readable);
+        assert!(load_src(r#"return { readable_colors = "no" }"#).is_err());
     }
 
     #[test]

@@ -162,13 +162,29 @@ fn base_colors(theme: &Theme, cell: &Cell, selected: bool) -> (u32, u32) {
             fg_color = Color::Indexed(i + 8);
         }
     }
-    let mut fg = theme.resolve(fg_color, theme.foreground);
+    // a palette colour on the default background: drawn readable
+    let mut fg = match (fg_color, cell.bg, &theme.fg_palette) {
+        (Color::Indexed(i @ 0..=15), Color::Default, Some(p)) if !cell.has(flags::INVERSE) => p[i as usize],
+        _ => theme.resolve(fg_color, theme.foreground),
+    };
     let mut bg = theme.resolve(cell.bg, theme.background);
     if cell.has(flags::INVERSE) {
         std::mem::swap(&mut fg, &mut bg);
     }
     if selected {
         bg = theme.selection;
+    }
+    if theme.fg_palette.is_some() && !cell.has(flags::HIDDEN) {
+        // readable on whatever is behind it: the selection (any text),
+        // or a coloured background (palette text; an exact colour a
+        // program chose is left alone)
+        let palette_fg = !matches!(fg_color, Color::Rgb(..));
+        let coloured_bg = !matches!(cell.bg, Color::Default) || cell.has(flags::INVERSE);
+        if selected {
+            fg = crate::theme::readable_on(fg, bg, crate::theme::MIN_TEXT_CONTRAST + 0.5);
+        } else if coloured_bg && palette_fg {
+            fg = crate::theme::readable_on(fg, bg, crate::theme::MIN_TEXT_CONTRAST);
+        }
     }
     if cell.has(flags::DIM) {
         fg = blend(bg, fg, 150);
@@ -252,6 +268,9 @@ pub fn build_pane(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, layout:
     } else {
         theme
     };
+    // the colours as drawn: readable text, selection and cursor
+    let drawn = theme.for_drawing();
+    let theme = &drawn;
 
     let rows = term.rows() as isize;
     let cols = term.cols();
@@ -618,11 +637,54 @@ fn truncate(s: &str, max: usize) -> String {
 /// A bordered box in the top-right corner, one line per `\n`. Returns its
 /// bottom edge.
 #[allow(clippy::too_many_arguments)]
+/// `text` broken into lines of at most `cols` columns: at spaces where it
+/// can, inside a word when one is longer than a whole line.
+pub(crate) fn wrap_text(text: &str, cols: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let cols = cols.max(1);
+    let mut out = Vec::new();
+    for para in text.lines() {
+        let mut line = String::new();
+        let mut used = 0;
+        for word in para.split(' ') {
+            let ww = crate::text_width(word);
+            let gap = usize::from(!line.is_empty());
+            if used + gap + ww <= cols {
+                if gap == 1 {
+                    line.push(' ');
+                }
+                line.push_str(word);
+                used += gap + ww;
+                continue;
+            }
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            // a word longer than a line: cut it
+            for c in word.chars() {
+                let w = c.width().unwrap_or(0);
+                if used + w > cols {
+                    out.push(std::mem::take(&mut line));
+                    used = 0;
+                }
+                line.push(c);
+                used += w;
+            }
+        }
+        out.push(line);
+    }
+    out
+}
+
 pub fn overlay(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, y: i32, o: &Overlay) -> i32 {
-    let lines: Vec<&str> = o.text.lines().collect();
-    let widest = lines.iter().map(|l| crate::text_width(l)).max().unwrap_or(0);
     let pad = cw as i32;
     let max_w = scene.width.saturating_sub(28);
+    // a long message wraps to the window instead of running off its edge
+    let fit_cols = (max_w.saturating_sub(pad as usize * 2) / cw.max(1)).max(8);
+    let wrapped = wrap_text(&o.text, fit_cols);
+    let lines: Vec<&str> = wrapped.iter().map(|s| s.as_str()).collect();
+    let widest = lines.iter().map(|l| crate::text_width(l)).max().unwrap_or(0);
     let w = (widest * cw + pad as usize * 2).min(max_w);
     let h = lines.len().max(1) * ch + 10;
     let x = scene.width as i32 - w as i32 - 14;
@@ -640,8 +702,11 @@ pub fn overlay(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize,
 pub fn status_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, bar: PxRect, pad_x: i32, s: &StatusLine, glass: bool) {
     let y = bar.y.round() as i32;
     let h = bar.h.round() as i32;
-    let bar_bg = blend(theme.background, theme.foreground, 16);
-    if glass {
+    let bar_bg = s.background.unwrap_or_else(|| blend(theme.background, theme.foreground, 16));
+    if let Some(bg) = s.background {
+        // a status line with its own colour (tmux's green): solid, edge to edge
+        scene.frect(bar, bg, 255);
+    } else if glass {
         scene.frect(bar, 0x000000, 50);
         scene.rect_a(0, y, scene.width, 1, 0xffffff, 26);
     } else {
@@ -935,6 +1000,182 @@ pub fn classic_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: us
     }
 }
 
+/// The other titled bars: the Windows console, GNOME Terminal's header
+/// bar, macOS Terminal and tmux's plain one. Each takes its colours from
+/// the system it comes from (light or dark to suit the theme), not from the
+/// terminal's palette.
+#[allow(clippy::too_many_arguments)]
+pub fn titled_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, bar: &TabBar, l: &TabBarLayout, scale: f32) {
+    use crate::tabbar::BarKind;
+    let s = scale.max(0.5);
+    let width = scene.width as f32;
+    let (th, _, tabs_h) = crate::tabbar::kind_rows(bar.kind, ch, s, bar.tabs.len() > 1);
+    let light = theme.is_light();
+    // (bar, title text, dimmer text)
+    let (bar_bg, text, dim) = match (bar.kind, light) {
+        (BarKind::Gnome, false) => (0x303030, 0xffffff, 0xb0b0b0),
+        (BarKind::Gnome, true) => (0xebebeb, 0x2e2e2e, 0x6e6e6e),
+        (BarKind::Mac, false) => (0x383838, 0xd0d0d0, 0x9a9a9a),
+        (BarKind::Mac, true) => (0xe8e6e8, 0x4d4d4d, 0x8a8a8a),
+        (_, false) => (0x202020, 0xffffff, 0xa0a0a0),
+        (_, true) => (0xf3f3f3, 0x1a1a1a, 0x6a6a6a),
+    };
+    scene.frect(PxRect { x: 0.0, y: 0.0, w: width, h: th }, bar_bg, 255);
+    // a hairline under the title row
+    let line = if light { blend(bar_bg, 0x000000, 26) } else { blend(bar_bg, 0x000000, 90) };
+    scene.rect(0, (th - 1.0) as i32, scene.width, 1, line);
+    let mid = th / 2.0;
+    let title = if bar.title.is_empty() { "Vibex".to_string() } else { bar.title.clone() };
+
+    match bar.kind {
+        BarKind::Windows | BarKind::Tmux => {
+            // icon and title on the left, as the console window has them
+            crate::icons::draw(scene, "terminal", 18.0 * s, mid, 15.0 * s, text);
+            let room = (width - 3.0 * (crate::tabbar::BUTTON_W * s) - 52.0 * s).max(40.0 * s);
+            let t = fit(fonts, cw, &title, false, room);
+            ui_text(scene, fonts, (36.0 * s).round() as i32, mid, cw, ch, &t, text, false);
+            for hit in [TabHit::Minimize, TabHit::Maximize, TabHit::Close] {
+                let Some(r) = l.rect(hit) else { continue };
+                let hot = bar.hover == Some(hit);
+                let mark = if hot && hit == TabHit::Close { 0xffffff } else { text };
+                if hot {
+                    if hit == TabHit::Close {
+                        scene.frect(r, 0xc42b1c, 255);
+                    } else {
+                        scene.frect(r, if light { 0x000000 } else { 0xffffff }, 24);
+                    }
+                }
+                let (cx, cy) = ((r.x + r.w / 2.0).round(), (r.y + r.h / 2.0).round());
+                let k = (5.0 * s).round();
+                match hit {
+                    TabHit::Minimize => scene.frect(PxRect { x: cx - k, y: cy, w: 2.0 * k, h: 1.0 }, mark, 255),
+                    TabHit::Maximize if bar.maximized => {
+                        outline(scene, PxRect { x: cx - k + 2.0, y: cy - k, w: 2.0 * k - 2.0, h: 2.0 * k - 2.0 }, mark);
+                        scene.frect(
+                            PxRect { x: cx - k, y: cy - k + 2.0, w: 2.0 * k - 2.0, h: 2.0 * k - 2.0 },
+                            if hot { blend(bar_bg, mark, 24) } else { bar_bg },
+                            255,
+                        );
+                        outline(scene, PxRect { x: cx - k, y: cy - k + 2.0, w: 2.0 * k - 2.0, h: 2.0 * k - 2.0 }, mark);
+                    }
+                    TabHit::Maximize => outline(scene, PxRect { x: cx - k, y: cy - k, w: 2.0 * k, h: 2.0 * k }, mark),
+                    _ => draw_thin_x(scene, PxRect { x: cx - k - 1.0, y: cy - k - 1.0, w: 2.0 * k + 2.0, h: 2.0 * k + 2.0 }, k, mark),
+                }
+            }
+        }
+        BarKind::Gnome => {
+            // a centred bold title, flat round buttons, + on the left
+            let room = (width - 2.0 * (3.0 * 36.0 * s + 24.0 * s)).max(40.0 * s);
+            let t = fit(fonts, cw, &title, true, room);
+            let tw = ui_width(fonts, cw, &t, true);
+            ui_text(scene, fonts, ((width - tw) / 2.0).round() as i32, mid, cw, ch, &t, text, true);
+            let btn = if light { 0xd8d8d8 } else { 0x454545 };
+            let btn_hot = if light { 0xc6c6c6 } else { 0x575757 };
+            for hit in [TabHit::Minimize, TabHit::Maximize, TabHit::Close] {
+                let Some(r) = l.rect(hit) else { continue };
+                let d = (24.0 * s).round();
+                let c = PxRect { x: (r.x + (r.w - d) / 2.0).round(), y: (mid - d / 2.0).round(), w: d, h: d };
+                let hot = bar.hover == Some(hit);
+                crate::glass::fill(scene, c, d / 2.0, if hot { btn_hot } else { btn }, 255);
+                let (cx, cy) = (c.x + d / 2.0, c.y + d / 2.0);
+                let k = (4.0 * s).round();
+                match hit {
+                    TabHit::Minimize => scene.frect(PxRect { x: cx - k, y: (cy + k / 2.0).round(), w: 2.0 * k, h: (1.5 * s).round().max(1.0) }, text, 255),
+                    TabHit::Maximize => outline(scene, PxRect { x: (cx - k).round(), y: (cy - k).round(), w: 2.0 * k, h: 2.0 * k }, text),
+                    _ => draw_thin_x(scene, PxRect { x: cx - k - 1.0, y: cy - k - 1.0, w: 2.0 * k + 2.0, h: 2.0 * k + 2.0 }, k, text),
+                }
+            }
+            if let Some(r) = l.rect(TabHit::NewTab) {
+                if bar.hover == Some(TabHit::NewTab) {
+                    crate::glass::fill(scene, r, 6.0 * s, btn_hot, 255);
+                }
+                let (cx, cy, k) = ((r.x + r.w / 2.0).round(), (r.y + r.h / 2.0).round(), (6.0 * s).round());
+                scene.frect(PxRect { x: cx - k, y: cy, w: 2.0 * k, h: (1.5 * s).round().max(1.0) }, text, 255);
+                scene.frect(PxRect { x: cx, y: cy - k, w: (1.5 * s).round().max(1.0), h: 2.0 * k }, text, 255);
+            }
+        }
+        _ => {
+            // macOS: traffic lights on the left, a centred title
+            let room = (width - 2.0 * 80.0 * s).max(40.0 * s);
+            let t = fit(fonts, cw, &title, false, room);
+            let tw = ui_width(fonts, cw, &t, false);
+            ui_text(scene, fonts, ((width - tw) / 2.0).round() as i32, mid, cw, ch, &t, text, false);
+            let any_hot = matches!(bar.hover, Some(TabHit::Close | TabHit::Minimize | TabHit::Maximize));
+            for (hit, fill) in [(TabHit::Close, 0xff5f57), (TabHit::Minimize, 0xfebc2e), (TabHit::Maximize, 0x28c840)] {
+                let Some(r) = l.rect(hit) else { continue };
+                let d = (12.0 * s).round();
+                let c = PxRect { x: (r.x + (r.w - d) / 2.0).round(), y: (mid - d / 2.0).round(), w: d, h: d };
+                crate::glass::fill(scene, c, d / 2.0, blend(fill, 0x000000, 40), 255);
+                let inner = PxRect { x: c.x + 0.5, y: c.y + 0.5, w: d - 1.0, h: d - 1.0 };
+                crate::glass::fill(scene, inner, (d - 1.0) / 2.0, fill, 255);
+                // the glyphs show while the pointer is over any of them
+                if any_hot {
+                    let (cx, cy) = (c.x + d / 2.0, c.y + d / 2.0);
+                    let k = (2.5 * s).round();
+                    let mark = blend(fill, 0x000000, 150);
+                    match hit {
+                        TabHit::Close => draw_thin_x(scene, PxRect { x: cx - k - 1.0, y: cy - k - 1.0, w: 2.0 * k + 2.0, h: 2.0 * k + 2.0 }, k, mark),
+                        TabHit::Minimize => scene.frect(PxRect { x: cx - k, y: cy.round(), w: 2.0 * k, h: 1.0 }, mark, 255),
+                        _ => {
+                            scene.frect(PxRect { x: cx - k, y: cy.round(), w: 2.0 * k, h: 1.0 }, mark, 255);
+                            scene.frect(PxRect { x: cx.round(), y: cy - k, w: 1.0, h: 2.0 * k }, mark, 255);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // the tab strip, when there's more than one tab
+    if tabs_h > 0.0 {
+        let y = th;
+        let strip = if light { blend(bar_bg, 0x000000, 16) } else { blend(bar_bg, 0x000000, 60) };
+        scene.frect(PxRect { x: 0.0, y, w: width, h: tabs_h }, strip, 255);
+        let active_bg = if bar.kind == BarKind::Mac { bar_bg } else { theme.background };
+        let active_text = if bar.kind == BarKind::Mac { text } else { theme.strong_text() };
+        for (i, tab) in bar.tabs.iter().enumerate() {
+            let Some(r) = l.rect(TabHit::Tab(i)) else { continue };
+            let hovered = bar.hover == Some(TabHit::Tab(i)) || bar.hover == Some(TabHit::CloseTab(i));
+            if tab.active {
+                scene.frect(r, active_bg, 255);
+                if bar.kind == BarKind::Gnome {
+                    // libadwaita marks the open tab with an accent line
+                    scene.frect(PxRect { x: r.x + 8.0 * s, y: r.y + r.h - (3.0 * s).round(), w: r.w - 16.0 * s, h: (3.0 * s).round() }, 0x3584e4, 255);
+                }
+            } else if hovered {
+                scene.frect(r, blend(strip, text, 18), 255);
+            }
+            if let Some(c) = tab.color {
+                scene.frect(PxRect { x: r.x, y: r.y, w: r.w, h: (3.0 * s).round() }, c, 255);
+            }
+            let fg = if tab.active { active_text } else { dim };
+            let close = l.rect(TabHit::CloseTab(i));
+            let right = close.map_or(r.x + r.w - 8.0 * s, |c| c.x) - 4.0 * s;
+            let label = fit(fonts, cw, &tab.title, tab.active, (right - r.x - 12.0 * s).max(0.0));
+            let lw = ui_width(fonts, cw, &label, tab.active);
+            let lx = (r.x + ((right - r.x) - lw).max(12.0 * s) / 2.0).round();
+            ui_text(scene, fonts, lx as i32, r.y + r.h / 2.0, cw, ch, &label, fg, tab.active);
+            if let Some(c) = close {
+                if hovered || tab.active {
+                    draw_thin_x(scene, c, (4.0 * s).round(), fg);
+                }
+            }
+            // a divider between two tabs that aren't the open one
+            if i + 1 < bar.tabs.len() && !tab.active && !bar.tabs[i + 1].active {
+                scene.frect(PxRect { x: (r.x + r.w - 1.0).round(), y: r.y + 7.0 * s, w: 1.0, h: r.h - 14.0 * s }, blend(strip, text, 40), 255);
+            }
+        }
+        if let Some(r) = l.rect(TabHit::NewTab).filter(|r| r.y >= y) {
+            if bar.hover == Some(TabHit::NewTab) {
+                scene.frect(r, blend(strip, text, 18), 255);
+            }
+            let (cx, cy, k) = (r.x + r.w / 2.0, r.y + r.h / 2.0, (5.0 * s).round());
+            scene.frect(PxRect { x: cx - k, y: cy.round(), w: 2.0 * k, h: 1.0 }, dim, 255);
+            scene.frect(PxRect { x: cx.round(), y: cy - k, w: 1.0, h: 2.0 * k }, dim, 255);
+        }
+    }
+}
+
 /// Like `fit`, but the ellipsis goes in the middle, so the end (a file name)
 /// stays: `C:\Users\me\…\settings.lua`.
 pub(crate) fn fit_middle(fonts: &mut FontSet, cw: usize, text: &str, bold: bool, max: f32) -> String {
@@ -1103,6 +1344,9 @@ pub(crate) fn outline(scene: &mut Scene, r: PxRect, c: u32) {
 
 /// The command palette: a centred box with a query line and a list.
 pub fn palette(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, top: f32, p: &PaletteView) {
+    // the highlighted row uses the selection colour: readable, as in panes
+    let drawn = theme.for_drawing();
+    let theme = &drawn;
     let max_rows = 12usize;
     let w = ((64 * cw) as f32).min(scene.width as f32 - 40.0).max(cw as f32 * 20.0);
     let x = ((scene.width as f32 - w) / 2.0).round();
