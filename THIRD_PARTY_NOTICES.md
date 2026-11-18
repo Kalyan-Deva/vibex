@@ -6,10 +6,11 @@ Vibex's own code is MIT OR Apache-2.0 (see [README.md](README.md#license)). The 
 |---|---|---|---|
 | OpenConsole (the console host that lets images through) | [microsoft/terminal](https://github.com/microsoft/terminal) | MIT | `OpenConsole.exe`, licence in `OpenConsole-LICENSE.txt` |
 | Neovim | [neovim/neovim](https://github.com/neovim/neovim), the official Windows build | Apache-2.0 and the Vim licence | `tools\nvim`, licence in `tools\LICENSES\neovim.txt` |
+| PSReadLine (the line editor Windows PowerShell panes load instead of the 2.0 that comes with Windows) | [PowerShell/PSReadLine](https://github.com/PowerShell/PSReadLine), Microsoft's signed build from the PowerShell Gallery | BSD-2-Clause | `psmodules\PSReadLine`, licence in `tools\LICENSES\psreadline.txt` |
 | GNU nano | [nano-editor.org](https://www.nano-editor.org), as built by [MSYS2](https://www.msys2.org) | GPL-3.0-or-later | `tools\nano` |
 | nano's runtime: msys2-runtime, ncurses, libintl, libiconv, file (libmagic), gcc-libs, zlib, bzip2, xz, zstd | [MSYS2](https://packages.msys2.org) | their own licences (GPL, LGPL, MIT, BSD and others) | `tools\nano\usr\bin`, every licence in `tools\LICENSES\msys2-*` |
 
-These programs aren't linked into Vibex. They're shipped beside it, and Vibex runs them as separate processes. The exact versions and SHA-256s are in [tools/bundle.lock](tools/bundle.lock).
+These programs aren't linked into Vibex. They're shipped beside it, and Vibex runs them as separate processes (PSReadLine is a PowerShell module that PowerShell itself loads). The exact versions and SHA-256s are in [tools/bundle.lock](tools/bundle.lock).
 
 The source for each MSYS2 package is in the [MSYS2-packages](https://github.com/msys2/MSYS2-packages) repository and at [mirror.msys2.org/msys/sources](https://mirror.msys2.org/msys/sources/). The installed `tools\LICENSES\SOURCES.txt` lists the exact package versions.
 

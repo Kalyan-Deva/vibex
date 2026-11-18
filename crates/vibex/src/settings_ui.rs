@@ -711,6 +711,12 @@ impl SettingsUi {
             footer_button: (!settings.values.is_empty() || !settings.keys.is_empty()).then(|| "Reset all".to_string()),
             note,
             dialog: true,
+            preview: PAGES[self.page].0 == Page::Appearance,
+            subtitle: match PAGES[self.page].0 {
+                Page::About => String::new(),
+                _ => "Changes are saved to settings.lua as you make them.".into(),
+            },
+            preview_theme: None,
         }
     }
 

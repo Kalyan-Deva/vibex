@@ -31,6 +31,27 @@ pub fn path_dirs() -> Vec<PathBuf> {
     [t.join("nvim").join("bin"), t.join("nano").join("usr").join("bin")].into_iter().filter(|d| d.is_dir()).collect()
 }
 
+/// `<folder of vibex.exe>\psmodules`, when it holds the bundled PSReadLine:
+/// Windows PowerShell 5.1's own PSReadLine (2.0) draws what you type in the
+/// wrong place after the window is resized, and newer ones re-measure.
+pub fn psmodules_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let d = exe.parent()?.join("psmodules");
+    d.join("PSReadLine").is_dir().then_some(d)
+}
+
+/// The highest PSReadLine version among `<dir>\PSReadLine\<version>` folders.
+pub fn psreadline_in(dir: &Path) -> Option<String> {
+    let mut best: Option<String> = None;
+    for e in std::fs::read_dir(dir.join("PSReadLine")).ok()?.flatten() {
+        let v = e.file_name().to_string_lossy().into_owned();
+        if v.chars().next().is_some_and(|c| c.is_ascii_digit()) && best.as_deref().is_none_or(|b| newer(&v, b)) {
+            best = Some(v);
+        }
+    }
+    best
+}
+
 /// One line of a lock file: tool, version, sha256, url.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pin {
@@ -323,6 +344,18 @@ mod tests {
         assert!(newer("10.0-1", "9.3-1"));
         assert!(!newer("0.12.6", "0.12.6"));
         assert!(!newer("9.2-1", "9.3-1"));
+    }
+
+    #[test]
+    fn finds_the_newest_psreadline() {
+        let d = std::env::temp_dir().join(format!("vibex-psrl-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for v in ["2.0.0", "2.10.1", "2.4.5", "notes"] {
+            std::fs::create_dir_all(d.join("PSReadLine").join(v)).unwrap();
+        }
+        assert_eq!(psreadline_in(&d).as_deref(), Some("2.10.1"));
+        assert_eq!(psreadline_in(&d.join("nothing-here")), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -49,6 +49,11 @@ $items = Get-Content $lockFile | Where-Object { $_.Trim() -and $_ -notmatch '^\s
 foreach ($need in 'nvim', 'nano') {
     if (@($items | Where-Object Name -eq $need).Count -ne 1) { throw "${lockFile}: needs exactly one '$need' line" }
 }
+# PSReadLine goes in <install>\psmodules, which the editor update (-Lock)
+# leaves alone: PowerShell panes keep its DLL open
+$psrl = $items | Where-Object Name -eq 'psreadline'
+$items = @($items | Where-Object Name -ne 'psreadline')
+if ($psrl -and -not $Lock) { $items += $psrl } else { $psrl = $null }
 
 foreach ($i in $items) {
     $ok = (Test-Path $i.File) -and ((Get-FileHash $i.File -Algorithm SHA256).Hash.ToLower() -eq $i.Sha)
@@ -85,7 +90,7 @@ if (-not $nvLicense) {
 $stage = Join-Path $cache 'stage-msys'
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory $stage | Out-Null
-foreach ($i in $items | Where-Object Name -ne 'nvim') {
+foreach ($i in $items | Where-Object { $_.Name -notin 'nvim', 'psreadline' }) {
     Expand-With-Tar $i.File $stage
 }
 $nano = Join-Path $out 'nano'
@@ -121,9 +126,26 @@ foreach ($t in 'cygwin', 'xterm', 'xterm-256color', 'ms-terminal', 'vt100', 'dum
 foreach ($d in Get-ChildItem (Join-Path $stage 'usr\share\licenses') -Directory -ErrorAction SilentlyContinue) {
     Copy-Item -Recurse $d.FullName (Join-Path $out "LICENSES\msys2-$($d.Name)")
 }
-$src = ($items | Where-Object Name -ne 'nvim' | ForEach-Object { "  $($_.Name) $($_.Version): $($_.Url)" }) -join "`n"
+# PSReadLine: the .nupkg is a zip; the module is its top level, less the
+# NuGet packaging files (psmodules\PSReadLine\<version>, as PowerShell wants)
+if ($psrl) {
+    $stage = Join-Path $cache 'stage-psrl'
+    if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+    New-Item -ItemType Directory $stage | Out-Null
+    Expand-With-Tar $psrl.File $stage
+    $mod = Join-Path $out "psmodules\PSReadLine\$($psrl.Version)"
+    New-Item -ItemType Directory -Force $mod | Out-Null
+    Get-ChildItem $stage -Force | Where-Object { $_.Name -notin '_rels', 'package', '[Content_Types].xml', 'PSReadLine.nuspec', '.signature.p7s' } |
+        ForEach-Object { Copy-Item -Recurse $_.FullName $mod }
+    if (-not (Test-Path (Join-Path $mod 'PSReadLine.psd1'))) { throw 'psreadline: no PSReadLine.psd1 in the package' }
+    Copy-Item (Join-Path $mod 'License.txt') (Join-Path $out 'LICENSES\psreadline.txt')
+    Remove-Item -Recurse -Force $stage
+}
+
+$src = ($items | Where-Object { $_.Name -notin 'nvim', 'psreadline' } | ForEach-Object { "  $($_.Name) $($_.Version): $($_.Url)" }) -join "`n"
 [IO.File]::WriteAllText((Join-Path $out 'LICENSES\SOURCES.txt'), @"
 Neovim $($nv.Version): https://github.com/neovim/neovim/tree/v$($nv.Version) (Apache-2.0 and the Vim licence)
+$(if ($psrl) { "PSReadLine $($psrl.Version): https://github.com/PowerShell/PSReadLine (BSD 2-Clause), from $($psrl.Url)`n" })
 
 GNU nano and its runtime come from the MSYS2 project (https://www.msys2.org).
 GNU nano is free software under the GNU GPL version 3 or later. The source

@@ -209,6 +209,14 @@ if (-not ${function:PSConsoleHostReadLine} -and $Host.Name -eq 'ConsoleHost' -an
     -not ([Environment]::GetCommandLineArgs() -match '^-(NonI|Command$|c$|File$|f$)')) {
     Import-Module PSReadLine -ErrorAction SilentlyContinue
 }
+# Vibex's own PSReadLine (it replaces Windows PowerShell's 2.0, which drew
+# typing in the wrong place after a resize): no history predictions, so it
+# behaves like the one it replaces
+$__vibexRl = Get-Module PSReadLine
+if ($env:VIBEX_PSMODULES -and $__vibexRl -and $__vibexRl.ModuleBase.StartsWith($env:VIBEX_PSMODULES, [StringComparison]::OrdinalIgnoreCase)) {
+    try { Set-PSReadLineOption -PredictionSource None } catch { }
+}
+Remove-Variable __vibexRl -ErrorAction SilentlyContinue
 if (${function:PSConsoleHostReadLine}) {
     $global:__VibexOriginalReadLine = ${function:PSConsoleHostReadLine}
     function global:PSConsoleHostReadLine {

@@ -44,6 +44,33 @@ fn find_gnu() -> Option<PathBuf> {
     tries.into_iter().find(|d| has(d))
 }
 
+/// Put `modules` (Vibex's PSReadLine) first on the shell's PSModulePath,
+/// unless a PSReadLine 2.2 or newer is installed in one of the usual places.
+fn add_psmodules(cmd: &mut Command, modules: &Path) {
+    let base = cmd.env.iter().find(|(k, _)| k.eq_ignore_ascii_case("PSModulePath")).map(|(_, v)| v.clone()).or_else(|| std::env::var("PSModulePath").ok());
+    let mut places: Vec<PathBuf> = base.iter().flat_map(|b| b.split(';')).filter(|p| !p.is_empty()).map(PathBuf::from).collect();
+    for root in ["USERPROFILE", "OneDrive"].iter().filter_map(std::env::var_os) {
+        places.push(PathBuf::from(root).join(r"Documents\WindowsPowerShell\Modules"));
+    }
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        places.push(PathBuf::from(pf).join(r"WindowsPowerShell\Modules"));
+    }
+    let own = |p: &Path| p.eq(modules);
+    if places.iter().filter(|p| !own(p)).filter_map(|p| crate::bundle::psreadline_in(p)).any(|v| !crate::bundle::newer("2.2", &v)) {
+        return;
+    }
+    let m = modules.to_string_lossy().into_owned();
+    let path = match base {
+        Some(b) if b.split(';').any(|p| p.eq_ignore_ascii_case(&m)) => return,
+        Some(b) if !b.is_empty() => format!("{m};{b}"),
+        _ => m.clone(),
+    };
+    cmd.env.retain(|(k, _)| !k.eq_ignore_ascii_case("PSModulePath"));
+    cmd.env.push(("PSModulePath".into(), path));
+    // vibex.ps1 keeps it as quiet as 2.0 was (no history predictions)
+    cmd.env.push(("VIBEX_PSMODULES".into(), m));
+}
+
 fn is_program(cmd: &Command, name: &str) -> bool {
     let file = Path::new(&cmd.program).file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     file == name || file == format!("{name}.exe")
@@ -73,6 +100,13 @@ pub fn prepare_with(cmd: &mut Command, on: bool, prompt: &str) {
         }
     }
     cmd.env.push(("VIBEX_COMMANDS".into(), if on { "1" } else { "0" }.into()));
+    // Windows PowerShell: the bundled PSReadLine first, unless a new enough
+    // one is installed already (PowerShell 7 has its own)
+    if is_program(cmd, "powershell") {
+        if let Some(m) = crate::bundle::psmodules_dir() {
+            add_psmodules(cmd, &m);
+        }
+    }
     // into WSL too
     let has_cell = cmd.env.iter().any(|(k, _)| k == "VIBEX_CELL_PX");
     if let Some((_, v)) = cmd.env.iter_mut().find(|(k, _)| k == "WSLENV") {

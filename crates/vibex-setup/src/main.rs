@@ -87,7 +87,7 @@ const OWNED_FILES: &[&str] = &[
     r"shell\vibex.bash",
     r"shell\vibex-commands.ps1",
 ];
-const OWNED_DIRS: &[&str] = &["tools", "tools.new", "tools.old"];
+const OWNED_DIRS: &[&str] = &["tools", "tools.new", "tools.old", "psmodules"];
 /// Suffixes of the files setup stages and swaps (see [`Txn`]).
 const NEW: &str = ".vibex-new";
 const OLD: &str = ".vibex-old";
@@ -622,6 +622,16 @@ fn install(lock_wait: Duration) -> Result<PathBuf, String> {
     }
     if !TOOLS.is_empty() {
         let new = stage_tools(&dir)?;
+        // PowerShell modules (a newer PSReadLine) get a folder of their own:
+        // every PowerShell pane keeps their DLL open, and the editor update
+        // swaps the whole tools folder while Vibex runs
+        let modules = new.join("psmodules");
+        if modules.is_dir() {
+            let staged = sibling(&dir.join("psmodules"), NEW);
+            let _ = remove_any(&staged);
+            std::fs::rename(&modules, &staged).map_err(|e| format!("cannot stage {}: {e}", staged.display()))?;
+            tx.stage_dir(&dir.join("psmodules"), staged);
+        }
         tx.stage_dir(&dir.join("tools"), new);
     }
     // 2. swap it all in, or none of it

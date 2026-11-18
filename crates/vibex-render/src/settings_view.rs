@@ -77,8 +77,15 @@ pub struct SettingsView {
     pub footer_button: Option<String>,
     /// A short note at the bottom of the page.
     pub note: String,
-    /// Drawn as a dialog: a title bar with ✕ above the page.
+    /// Drawn as a dialog: a ✕ in the corner.
     pub dialog: bool,
+    /// A live terminal preview beside the rows (Appearance).
+    pub preview: bool,
+    /// A line under the page title (empty: none).
+    pub subtitle: String,
+    /// The preview shows this built-in theme instead (hovered in the
+    /// theme list), so you can try one before you pick it.
+    pub preview_theme: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -130,126 +137,227 @@ pub fn round_rect(scene: &mut Scene, r: PxRect, radius: f32, color: u32, alpha: 
     }
 }
 
-fn round_outline(scene: &mut Scene, r: PxRect, radius: f32, color: u32, fill: u32) {
-    round_rect(scene, r, radius, color, 255);
-    round_rect(scene, PxRect { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 }, (radius - 1.0).max(0.0), fill, 255);
-}
-
-struct Ink {
-    /// Section headings: the text, warmed with the accent.
-    heading: u32,
-    text: u32,
-    dim: u32,
+/// Colours for Settings, dialogs and menus. Flat: the theme's own colours,
+/// one accent taken from the theme, no gradients or glows.
+pub(crate) struct Ink {
+    /// The dialog's surface, and the sidebar beside it.
+    pub(crate) surface: u32,
+    pub(crate) side: u32,
+    /// Its 1px edge.
+    pub(crate) edge: u32,
+    pub(crate) text: u32,
+    pub(crate) dim: u32,
+    /// Group headings: quieter than labels, louder than details.
+    pub(crate) heading: u32,
+    /// Filled controls (dropdowns, fields, buttons) and their hover.
+    pub(crate) field: u32,
+    pub(crate) field_hover: u32,
+    /// Row dividers.
+    pub(crate) rule: u32,
+    /// Hover and selection fills (nav items, menu rows).
+    pub(crate) hover: u32,
+    pub(crate) selected: u32,
+    /// Tracks: toggle off, slider rail.
+    pub(crate) track: u32,
+    pub(crate) accent: u32,
+    pub(crate) on_accent: u32,
+    pub(crate) warn: u32,
+    // kept for the confirm dialog
     card: u32,
     card_hover: u32,
     line: u32,
-    accent: u32,
-    on_accent: u32,
-    warn: u32,
 }
 
-fn ink(theme: &Theme) -> Ink {
+/// The theme's own accent: its blue (or cyan, or the text colour), whichever
+/// first reads on the dialog.
+pub(crate) fn accent(theme: &Theme, on: u32) -> u32 {
+    let p = &theme.palette;
+    let picks = if theme.is_light() { [p[4], p[12], p[6], p[5]] } else { [p[12], p[4], p[14], p[6]] };
+    picks.into_iter().find(|c| crate::theme::contrast(*c, on) >= 3.0).unwrap_or_else(|| crate::theme::readable_on(p[4], on, 3.0))
+}
+
+pub(crate) fn ink(theme: &Theme) -> Ink {
     let bg = theme.background;
-    let (c0, _) = crate::glass::accents(theme);
+    let fg = theme.foreground;
+    let light = theme.is_light();
+    // dark: lifted a little off the terminal; light: the background itself
+    let surface = if light { blend(bg, 0xffffff, 120) } else { blend(bg, fg, 9) };
+    let side = if light { blend(bg, fg, 8) } else { bg };
     let text = theme.strong_text();
+    let accent = accent(theme, surface);
     Ink {
-        heading: blend(text, c0, 150),
+        surface,
+        side,
+        edge: blend(bg, fg, if light { 46 } else { 34 }),
         text,
-        dim: if crate::glass::tint(theme) == 0xffffff { blend(bg, 0xdfe6ee, 150) } else { blend(bg, theme.foreground, 150) },
-        card: blend(bg, theme.foreground, 14),
-        card_hover: blend(bg, theme.foreground, 24),
-        line: blend(bg, theme.foreground, 60),
-        accent: c0,
-        on_accent: Theme::text_on(c0),
-        warn: theme.palette[1],
+        dim: crate::theme::readable_on(blend(surface, fg, 140), surface, 3.2),
+        heading: crate::theme::readable_on(blend(surface, fg, 120), surface, 2.6),
+        field: blend(surface, fg, if light { 20 } else { 22 }),
+        field_hover: blend(surface, fg, if light { 32 } else { 34 }),
+        rule: blend(surface, fg, if light { 26 } else { 22 }),
+        hover: blend(surface, fg, 12),
+        selected: blend(surface, fg, if light { 26 } else { 24 }),
+        track: blend(surface, fg, if light { 60 } else { 52 }),
+        accent,
+        on_accent: Theme::text_on(accent),
+        warn: crate::theme::readable_on(theme.palette[1], surface, 3.0),
+        card: blend(surface, fg, 14),
+        card_hover: blend(surface, fg, 26),
+        line: blend(surface, fg, 60),
     }
 }
 
-/// Draw the Settings page into `area` (below the tab bar).
+/// The surface Settings sits on: a soft shadow, the flat surface, a 1px edge.
+pub fn sheet(scene: &mut Scene, theme: &Theme, r: PxRect, s: f32) {
+    let k = ink(theme);
+    let radius = 10.0 * s;
+    for (grow, a) in [(16.0, 12u8), (8.0, 22), (2.0, 40)] {
+        let g = grow * s;
+        crate::glass::fill(scene, PxRect { x: r.x - g, y: r.y - g + 10.0 * s, w: r.w + 2.0 * g, h: r.h + 2.0 * g }, radius + g, 0x000000, a);
+    }
+    crate::glass::fill(scene, r, radius, k.edge, 255);
+    crate::glass::fill(scene, PxRect { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 }, radius - 1.0, k.surface, 255);
+}
+
+/// Lines for the live preview: (text, palette index or None for the
+/// foreground) runs per line. The last line ends with the cursor.
+const PREVIEW: &[&[(&str, Option<usize>)]] = &[
+    &[(r"PS C:\dev> ", Some(4)), ("git status", None)],
+    &[("On branch ", None), ("main", Some(5))],
+    &[("  modified: ", Some(1)), ("src/main.rs", Some(1))],
+    &[("  new file: ", Some(2)), ("notes.md", Some(2))],
+    &[("", None)],
+    &[(r"PS C:\dev> ", Some(4)), ("cargo build", None)],
+    &[("warning", Some(3)), (": unused var `x`", None)],
+    &[("   --> ", Some(12)), ("src/main.rs:4:9", None)],
+    &[("    ", None), ("Finished", Some(2)), (" in 1.2s", None)],
+    &[("# tidy this up later", Some(8))],
+    &[(r"PS C:\dev> ", Some(4))],
+];
+
+/// A small terminal in the real font and colours (Appearance page).
+#[allow(clippy::too_many_arguments)]
+fn preview(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, k: &Ink, r: PxRect, s: f32) {
+    let t = theme.for_drawing();
+    let color = |i: Option<usize>| match i {
+        Some(i) => t.fg_palette.map_or(t.palette[i], |p| p[i]),
+        None => t.foreground,
+    };
+    crate::glass::fill(scene, r, 8.0 * s, k.edge, 255);
+    crate::glass::fill(scene, PxRect { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 }, 7.0 * s, t.background, 255);
+    scene.clip(Some(PxRect { x: r.x + 1.0, y: r.y + 1.0, w: r.w - 2.0, h: r.h - 2.0 }));
+    let pad = (12.0 * s).round();
+    let mut y = r.y + pad;
+    for (n, runs) in PREVIEW.iter().enumerate() {
+        if y + ch as f32 > r.y + r.h - pad / 2.0 {
+            break;
+        }
+        let base = y as i32 + fonts.baseline;
+        let mut x = (r.x + pad) as i32;
+        for (text, c) in runs.iter() {
+            x = crate::scene::text_run(scene, fonts, x, base, cw, text, color(*c), crate::font::Style::Regular);
+        }
+        if n + 1 == PREVIEW.len() {
+            scene.frect(PxRect { x: x as f32, y, w: cw as f32, h: ch as f32 }, t.cursor, 255);
+        }
+        y += ch as f32;
+    }
+    scene.clip(None);
+}
+
+/// Draw the Settings page into `area` (the dialog's rectangle, or the area
+/// below the tab bar).
 #[allow(clippy::too_many_arguments)]
 pub fn settings(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, area: PxRect, v: &SettingsView, scale: f32) -> SettingsLayout {
     let s = scale.max(0.5);
     let k = ink(theme);
     let mut regions = Vec::new();
     scene.clip(Some(area));
-    let mut area = area;
-    if v.dialog {
-        // title bar: "Settings" and ✕
-        let hh = (56.0 * s).round();
-        let tint = crate::glass::tint(theme);
-        // a little gradient gem before the title
-        let gem = PxRect { x: area.x + 22.0 * s, y: area.y + hh / 2.0 - 7.0 * s, w: 14.0 * s, h: 14.0 * s };
-        crate::glass::pill(scene, theme, gem, 5.0 * s, 255, 255);
-        let end = ui_text(scene, fonts, (gem.x + gem.w + 12.0 * s).round() as i32, area.y + hh / 2.0, cw, ch, "Settings", k.text, true);
-        ui_text(scene, fonts, end + (12.0 * s) as i32, area.y + hh / 2.0, cw, ch, "make it yours", k.dim, false);
-        let cw_btn = (34.0 * s).round();
-        let close = PxRect { x: area.x + area.w - cw_btn - 14.0 * s, y: area.y + (hh - cw_btn) / 2.0, w: cw_btn, h: cw_btn };
-        let hot = v.hover == Some(SettingsHit::Close);
-        crate::glass::fill(scene, close, cw_btn / 2.0, if hot { 0xe5484d } else { tint }, if hot { 230 } else { 14 });
-        crate::icons::draw(scene, "close", close.x + close.w / 2.0, close.y + close.h / 2.0, 16.0 * s, if hot { 0xffffff } else { k.text });
-        regions.push((close, SettingsHit::Close));
-        scene.frect(PxRect { x: area.x + 16.0 * s, y: area.y + hh, w: area.w - 32.0 * s, h: 1.0 }, tint, 22);
-        area = PxRect { y: area.y + hh + 1.0, h: area.h - hh - 1.0, ..area };
-    }
 
-    // sidebar
-    let side_w = (220.0 * s).round().min(area.w * 0.35);
-    let item_h = (40.0 * s).round();
-    let tint = crate::glass::tint(theme);
-    let mut y = area.y + 14.0 * s;
+    // sidebar: its own shade, "Settings", the pages, a quiet reset link
+    let side_w = (206.0 * s).round().min(area.w * 0.35);
+    let side = PxRect { x: area.x + 1.0, y: area.y + 1.0, w: side_w - 1.0, h: area.h - 2.0 };
+    if v.dialog {
+        // rounded on the left, like the dialog
+        let r = 9.0 * s;
+        crate::glass::fill(scene, PxRect { w: side.w + r, ..side }, r, k.side, 255);
+        scene.frect(PxRect { x: side.x + side.w, y: side.y, w: r + 1.0, h: side.h }, k.surface, 255);
+    } else {
+        scene.frect(side, k.side, 255);
+    }
+    scene.frect(PxRect { x: area.x + side_w, y: area.y + 1.0, w: 1.0, h: area.h - 2.0 }, k.rule, 255);
+    let inner_x = area.x + 10.0 * s;
+    let item_w = side_w - 20.0 * s;
+    ui_text(scene, fonts, (inner_x + 12.0 * s).round() as i32, area.y + 30.0 * s, cw, ch, "Settings", k.text, true);
+    let item_h = (32.0 * s).round();
+    let mut y = area.y + 56.0 * s;
     for (i, name) in v.pages.iter().enumerate() {
-        let r = PxRect { x: area.x + 12.0 * s, y, w: side_w - 22.0 * s, h: item_h };
+        let r = PxRect { x: inner_x, y, w: item_w, h: item_h };
         let selected = i == v.page;
         let hovered = v.hover == Some(SettingsHit::Page(i));
         if selected {
-            crate::glass::pill(scene, theme, r, item_h / 2.0, 120, 40);
-            crate::glass::ring(scene, r, item_h / 2.0, tint, 40);
+            crate::glass::fill(scene, r, 6.0 * s, k.selected, 255);
+            let bar_h = (r.h - 16.0 * s).max(8.0);
+            crate::glass::fill(scene, PxRect { x: r.x, y: r.y + (r.h - bar_h) / 2.0, w: (2.0 * s).max(2.0), h: bar_h }, 1.0 * s, k.accent, 255);
         } else if hovered {
-            crate::glass::fill(scene, r, item_h / 2.0, tint, 14);
+            crate::glass::fill(scene, r, 6.0 * s, k.hover, 255);
         }
-        // the selected page: white on the dark glass, near-black on light
-        let on_pill = if theme.is_light() { 0x0d1b2a } else { 0xffffff };
-        let fg = if selected {
-            on_pill
-        } else if hovered {
-            k.text
-        } else {
-            k.dim
-        };
-        crate::icons::draw_in(
-            scene,
-            page_icon(name),
-            r.x + 22.0 * s,
-            r.y + r.h / 2.0,
-            18.0 * s,
-            fg,
-            if selected { on_pill } else { crate::glass::accents(theme).0 },
-        );
-        ui_text(scene, fonts, (r.x + 42.0 * s).round() as i32, r.y + r.h / 2.0, cw, ch, name, fg, selected);
+        let fg = if selected || hovered { k.text } else { k.dim };
+        ui_text(scene, fonts, (r.x + 12.0 * s).round() as i32, r.y + r.h / 2.0, cw, ch, name, fg, selected);
         regions.push((r, SettingsHit::Page(i)));
-        y += item_h + 4.0 * s;
+        y += item_h + 2.0 * s;
     }
     if let Some(label) = &v.footer_button {
-        let r = PxRect { x: area.x + 14.0 * s, y: area.y + area.h - item_h - 14.0 * s, w: side_w - 26.0 * s, h: item_h };
-        button(scene, fonts, cw, ch, &k, r, label, v.hover == Some(SettingsHit::Footer), s);
-        let _ = theme;
+        let hot = v.hover == Some(SettingsHit::Footer);
+        let w = ui_width(fonts, cw, label, false) + 24.0 * s;
+        let r = PxRect { x: inner_x, y: area.y + area.h - item_h - 12.0 * s, w, h: item_h };
+        if hot {
+            crate::glass::fill(scene, r, 6.0 * s, k.hover, 255);
+        }
+        ui_text(scene, fonts, (r.x + 12.0 * s).round() as i32, r.y + r.h / 2.0, cw, ch, label, if hot { k.text } else { k.dim }, false);
         regions.push((r, SettingsHit::Footer));
     }
-    scene.frect(PxRect { x: area.x + side_w, y: area.y + 14.0 * s, w: 1.0, h: area.h - 28.0 * s }, tint, 20);
 
-    // page
-    let px = area.x + side_w + 28.0 * s;
-    let pw = (area.x + area.w - px - 28.0 * s).min(900.0 * s).max(100.0);
-    let page_clip = PxRect { x: area.x + side_w + 1.0, y: area.y, w: area.w - side_w - 1.0, h: area.h };
+    // close: a plain ✕ in the corner
+    if v.dialog {
+        let b = (28.0 * s).round();
+        let close = PxRect { x: area.x + area.w - b - 14.0 * s, y: area.y + 14.0 * s, w: b, h: b };
+        let hot = v.hover == Some(SettingsHit::Close);
+        if hot {
+            crate::glass::fill(scene, close, 6.0 * s, 0xc42b1c, 255);
+        }
+        crate::icons::draw(scene, "close", close.x + close.w / 2.0, close.y + close.h / 2.0, 15.0 * s, if hot { 0xffffff } else { k.dim });
+        regions.push((close, SettingsHit::Close));
+    }
+
+    // the page, with the preview beside it when there's room
+    let px = area.x + side_w + 34.0 * s;
+    let room = area.x + area.w - px - 34.0 * s;
+    // the longest sample line is 25 columns
+    let prev_w = (cw as f32 * 27.0 + 26.0 * s).min(340.0 * s);
+    let with_preview = v.preview && room - prev_w - 28.0 * s >= 340.0 * s;
+    let pw = if with_preview { room - prev_w - 28.0 * s } else { room.min(820.0 * s) }.max(100.0);
+    let page_clip = PxRect { x: area.x + side_w + 1.0, y: area.y + 1.0, w: area.w - side_w - 2.0, h: area.h - 2.0 };
     scene.clip(Some(page_clip));
-    let mut y = area.y + 18.0 * s - v.scroll;
+    let mut y = area.y + 22.0 * s - v.scroll;
     let start_y = y;
-    ui_text(scene, fonts, px.round() as i32, y + 14.0 * s, cw, ch, &v.title, k.text, true);
-    y += 40.0 * s;
+    ui_text(scene, fonts, px.round() as i32, y + 12.0 * s, cw, ch, &v.title, k.text, true);
+    y += 26.0 * s;
+    if !v.subtitle.is_empty() {
+        let t = fit(fonts, cw, &v.subtitle, false, room);
+        ui_text(scene, fonts, px.round() as i32, y + 8.0 * s, cw, ch, &t, k.dim, false);
+        y += 34.0 * s;
+    } else {
+        y += 10.0 * s;
+    }
+    let rows_top = y;
 
     if let Some(f) = &v.filter {
-        let r = PxRect { x: px, y, w: pw.min(420.0 * s), h: (34.0 * s).round() };
-        round_outline(scene, r, 5.0 * s, if v.focus.is_none() { k.accent } else { k.line }, k.card);
+        let r = PxRect { x: px, y, w: pw.min(420.0 * s), h: (32.0 * s).round() };
+        crate::glass::fill(scene, r, 6.0 * s, k.field, 255);
+        if v.focus.is_none() {
+            crate::glass::ring(scene, r, 6.0 * s, k.accent, 255);
+        }
         let (text, fg) = if f.is_empty() { ("Search shortcuts", k.dim) } else { (f.as_str(), k.text) };
         let end = ui_text(scene, fonts, (r.x + 12.0 * s).round() as i32, r.y + r.h / 2.0, cw, ch, text, fg, false);
         if v.focus.is_none() {
@@ -260,29 +368,30 @@ pub fn settings(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize
         y += r.h + 14.0 * s;
     }
 
-    let row_h = (62.0 * s).round();
-    let pad = 16.0 * s;
+    let row_h = (54.0 * s).round();
+    let pad = 2.0 * s;
     for (i, row) in v.rows.iter().enumerate() {
         if row.control == Control::Header {
-            y += 12.0 * s;
-            let end = ui_text(scene, fonts, px.round() as i32, y + 12.0 * s, cw, ch, &row.label, k.heading, true);
-            // a soft line running off to the right
-            let lx = end as f32 + 12.0 * s;
-            if lx < px + pw {
-                crate::glass::gradient(scene, PxRect { x: lx, y: (y + 12.0 * s).round(), w: px + pw - lx, h: 1.0 }, 0.0, tint, tint, 30, 0);
-            }
-            y += 32.0 * s;
+            y += 14.0 * s;
+            ui_text(scene, fonts, px.round() as i32, y + 10.0 * s, cw, ch, &row.label, k.heading, true);
+            y += 26.0 * s;
             continue;
         }
         let r = PxRect { x: px, y, w: pw, h: row_h };
         let visible = r.y + r.h > area.y && r.y < area.y + area.h;
+        // a rule under the row, unless a heading (or the end) follows
+        let ruled = v.rows.get(i + 1).is_some_and(|n| n.control != Control::Header);
         if visible {
             let hovered = matches!(v.hover, Some(h) if hit_row(h) == Some(i));
-            crate::glass::card(scene, theme, r, 12.0 * s, hovered);
-            if v.focus == Some(i) {
-                // focus ring
-                let ring = PxRect { x: r.x - 2.0, y: r.y - 2.0, w: r.w + 4.0, h: r.h + 4.0 };
-                crate::glass::ring(scene, ring, 14.0 * s, k.accent, 220);
+            if hovered || v.focus == Some(i) {
+                let band = PxRect { x: r.x - 10.0 * s, y: r.y + 1.0, w: r.w + 20.0 * s, h: r.h - 2.0 };
+                crate::glass::fill(scene, band, 6.0 * s, k.hover, 255);
+                if v.focus == Some(i) {
+                    crate::glass::ring(scene, band, 6.0 * s, k.accent, 255);
+                }
+            }
+            if ruled {
+                scene.frect(PxRect { x: r.x, y: (r.y + r.h).round() - 1.0, w: r.w, h: 1.0 }, k.rule, 255);
             }
             regions.push((r, SettingsHit::Row(i)));
             let (label_y, detail_y) =
@@ -291,29 +400,33 @@ pub fn settings(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize
             // control area from the right
             let right = r.x + r.w - pad;
             let control_left = draw_control(scene, fonts, theme, cw, ch, &k, &mut regions, i, &row.control, right, r, v.hover, s);
-            let mut left_limit = control_left - 12.0 * s;
-            if !row.swatches.is_empty() {
-                let sw = (14.0 * s).round();
-                let total = row.swatches.len() as f32 * (sw + 3.0 * s);
-                let mut sx = left_limit - total;
-                for c in &row.swatches {
-                    let dot = PxRect { x: sx.round(), y: (r.y + (r.h - sw) / 2.0).round(), w: sw, h: sw };
-                    crate::glass::fill(scene, dot, sw / 2.0, *c, 255);
-                    crate::glass::ring(scene, dot, sw / 2.0, tint, 60);
-                    sx += sw + 3.0 * s;
+            let mut left_limit = control_left - 14.0 * s;
+            // the label keeps room for itself (up to 150px); the extras give way
+            let label_need = ui_width(fonts, cw, &row.label, false).min(150.0 * s) + 16.0 * s;
+            let reset_w = if row.changed { ui_width(fonts, cw, "Reset", false) + 18.0 * s } else { 0.0 };
+            let sw = (13.0 * s).round();
+            let strip_w = row.swatches.len() as f32 * sw + 14.0 * s;
+            if !row.swatches.is_empty() && left_limit - strip_w - reset_w - (r.x + pad) >= label_need {
+                // the palette as one strip of squares
+                let n = row.swatches.len() as f32;
+                let strip = PxRect { x: (left_limit - n * sw).round(), y: (r.y + (r.h - sw) / 2.0).round(), w: n * sw, h: sw };
+                crate::glass::fill(scene, PxRect { x: strip.x - 1.0, y: strip.y - 1.0, w: strip.w + 2.0, h: strip.h + 2.0 }, 3.0 * s, k.edge, 255);
+                for (n, c) in row.swatches.iter().enumerate() {
+                    scene.frect(PxRect { x: strip.x + n as f32 * sw, y: strip.y, w: sw, h: sw }, *c, 255);
                 }
-                left_limit -= total + 10.0 * s;
+                left_limit = strip.x - 14.0 * s;
             }
             if row.changed {
                 let t = "Reset";
-                let w = ui_width(fonts, cw, t, false) + 12.0 * s;
-                let rr = PxRect { x: left_limit - w, y: r.y + (r.h - 26.0 * s) / 2.0, w, h: 26.0 * s };
-                if v.hover == Some(SettingsHit::Reset(i)) {
-                    crate::glass::fill(scene, rr, rr.h / 2.0, tint, 20);
-                }
-                ui_text(scene, fonts, (rr.x + 6.0 * s).round() as i32, rr.y + rr.h / 2.0, cw, ch, t, k.accent, false);
+                let hot = v.hover == Some(SettingsHit::Reset(i));
+                let tw = ui_width(fonts, cw, t, false);
+                let rr = PxRect { x: left_limit - tw - 8.0 * s, y: r.y + (r.h - 26.0 * s) / 2.0, w: tw + 8.0 * s, h: 26.0 * s };
+                let fg = if hot { k.text } else { k.dim };
+                ui_text(scene, fonts, (rr.x + 4.0 * s).round() as i32, rr.y + rr.h / 2.0, cw, ch, t, fg, false);
+                // underlined: it's a link, not a button
+                scene.frect(PxRect { x: rr.x + 4.0 * s, y: (rr.y + rr.h / 2.0 + 9.0 * s).round(), w: tw, h: 1.0 }, if hot { k.text } else { k.rule }, 255);
                 regions.push((rr, SettingsHit::Reset(i)));
-                left_limit = rr.x - 8.0 * s;
+                left_limit = rr.x - 10.0 * s;
             }
             let label_max = (left_limit - (r.x + pad)).max(20.0);
             let label = fit(fonts, cw, &row.label, false, label_max);
@@ -326,13 +439,26 @@ pub fn settings(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize
                 ui_text(scene, fonts, (r.x + pad).round() as i32, detail_y, cw, ch, &t, k.dim, false);
             }
         }
-        y += row_h + 8.0 * s;
+        y += row_h;
     }
     if !v.note.is_empty() {
-        y += 8.0 * s;
+        y += 14.0 * s;
         let note = fit(fonts, cw, &v.note, false, pw);
         ui_text(scene, fonts, px.round() as i32, y + 10.0 * s, cw, ch, &note, k.dim, false);
         y += 30.0 * s;
+    }
+    if with_preview {
+        let x = px + pw + 28.0 * s;
+        ui_text(scene, fonts, x.round() as i32, rows_top + 10.0 * s, cw, ch, "Preview", k.heading, true);
+        let h = (PREVIEW.len() as f32 * ch as f32 + 24.0 * s).min(area.y + area.h - rows_top - 60.0 * s);
+        let trying = v.preview_theme.as_deref().and_then(Theme::builtin);
+        preview(scene, fonts, trying.as_ref().unwrap_or(theme), cw, ch, &k, PxRect { x, y: (rows_top + 28.0 * s).round(), w: prev_w, h }, s);
+        let note = match (&trying, v.preview_theme.as_deref()) {
+            (Some(_), Some(id)) => format!("Trying {}: pick it to keep it.", Theme::title(id)),
+            _ => "Your theme, font and size, as you change them.".to_string(),
+        };
+        let note = fit(fonts, cw, &note, false, prev_w + 40.0 * s);
+        ui_text(scene, fonts, x.round() as i32, rows_top + 28.0 * s + h + 18.0 * s, cw, ch, &note, k.dim, false);
     }
     scene.clip(None);
     SettingsLayout { regions, content_height: y - start_y + 24.0 * s, view_height: area.h }
@@ -347,10 +473,7 @@ fn hit_row(h: SettingsHit) -> Option<usize> {
 
 #[allow(clippy::too_many_arguments)]
 fn button(scene: &mut Scene, fonts: &mut FontSet, cw: usize, ch: usize, k: &Ink, r: PxRect, label: &str, hovered: bool, s: f32) {
-    let t = if k.text & 0x80_0000 != 0 { 0xffffff } else { 0x000000 };
-    crate::glass::fill(scene, r, r.h / 2.0, t, if hovered { 30 } else { 16 });
-    crate::glass::ring(scene, r, r.h / 2.0, t, if hovered { 60 } else { 34 });
-    let _ = s;
+    crate::glass::fill(scene, r, 6.0 * s, if hovered { k.field_hover } else { k.field }, 255);
     let w = ui_width(fonts, cw, label, false);
     ui_text(scene, fonts, (r.x + (r.w - w) / 2.0).round() as i32, r.y + r.h / 2.0, cw, ch, label, k.text, false);
 }
@@ -373,6 +496,7 @@ fn draw_control(
     s: f32,
 ) -> f32 {
     let mid = r.y + r.h / 2.0;
+    let _ = theme;
     match c {
         Control::Header => right,
         Control::Info(t) => {
@@ -383,75 +507,57 @@ fn draw_control(
             right - w
         }
         Control::Toggle(on) => {
-            let (w, h) = ((44.0 * s).round(), (24.0 * s).round());
+            // flat: the accent when on, a grey track when off; no words
+            let (w, h) = ((36.0 * s).round(), (20.0 * s).round());
             let t = PxRect { x: right - w, y: (mid - h / 2.0).round(), w, h };
-            let tint = crate::glass::tint(theme);
+            let d = h - 6.0 * s;
             if *on {
-                crate::glass::pill(scene, theme, t, h / 2.0, 255, 255);
-                let d = h - 6.0 * s;
-                let knob = PxRect { x: t.x + w - d - 3.0 * s, y: t.y + 3.0 * s, w: d, h: d };
-                crate::glass::fill(scene, PxRect { y: knob.y + 1.0 * s, ..knob }, d / 2.0, 0x000000, 50);
-                crate::glass::fill(scene, knob, d / 2.0, 0xffffff, 255);
+                crate::glass::fill(scene, t, h / 2.0, k.accent, 255);
+                crate::glass::fill(scene, PxRect { x: t.x + w - d - 3.0 * s, y: t.y + 3.0 * s, w: d, h: d }, d / 2.0, k.on_accent, 255);
             } else {
-                crate::glass::fill(scene, t, h / 2.0, tint, 18);
-                crate::glass::ring(scene, t, h / 2.0, tint, 70);
-                let d = h - 8.0 * s;
-                crate::glass::fill(scene, PxRect { x: t.x + 4.0 * s, y: t.y + 4.0 * s, w: d, h: d }, d / 2.0, k.dim, 255);
+                crate::glass::fill(scene, t, h / 2.0, k.track, 255);
+                crate::glass::fill(scene, PxRect { x: t.x + 3.0 * s, y: t.y + 3.0 * s, w: d, h: d }, d / 2.0, k.surface, 255);
             }
-            let word = if *on { "On" } else { "Off" };
-            let ww = ui_width(fonts, cw, word, false);
-            ui_text(scene, fonts, (t.x - 10.0 * s - ww).round() as i32, mid, cw, ch, word, k.dim, false);
-            regions.push((PxRect { x: t.x - 16.0 * s - ww, y: r.y, w: w + ww + 16.0 * s, h: r.h }, SettingsHit::Control(i)));
-            t.x - 10.0 * s - ww
+            regions.push((PxRect { x: t.x - 8.0 * s, y: r.y, w: w + 8.0 * s, h: r.h }, SettingsHit::Control(i)));
+            t.x
         }
         Control::Choice(value) => {
-            // a dropdown: the value, and a chevron; the whole box opens it
-            let w = (230.0 * s).round();
-            let h = (32.0 * s).round();
+            // a dropdown: a filled box with the value and a chevron
+            let w = (200.0 * s).round().min(r.w * 0.45);
+            let h = (30.0 * s).round();
             let b = PxRect { x: right - w, y: (mid - h / 2.0).round(), w, h };
             let hovered = hover == Some(SettingsHit::Control(i));
-            crate::glass::card(scene, theme, b, 10.0 * s, hovered);
-            crate::icons::draw(scene, "chevron-down", b.x + w - 18.0 * s, mid, 16.0 * s, k.text);
+            crate::glass::fill(scene, b, 6.0 * s, if hovered { k.field_hover } else { k.field }, 255);
+            crate::icons::draw(scene, "chevron-down", b.x + w - 16.0 * s, mid, 14.0 * s, k.dim);
             regions.push((b, SettingsHit::Control(i)));
-            let t = fit(fonts, cw, value, false, w - 44.0 * s);
-            ui_text(scene, fonts, (b.x + 12.0 * s).round() as i32, mid, cw, ch, &t, k.text, false);
+            let t = fit(fonts, cw, value, false, w - 40.0 * s);
+            ui_text(scene, fonts, (b.x + 10.0 * s).round() as i32, mid, cw, ch, &t, k.text, false);
             b.x
         }
         Control::Slider { value, text } => {
-            let track_w = (180.0 * s).round();
-            let tw = ui_width(fonts, cw, text, false).max(36.0 * s);
-            let tx = right - tw;
-            ui_text(scene, fonts, tx.round() as i32, mid, cw, ch, text, k.text, false);
-            let x0 = tx - 14.0 * s - track_w;
-            let th = (6.0 * s).round().max(3.0);
+            let track_w = (170.0 * s).min(r.w * 0.26).round();
+            let text_w = ui_width(fonts, cw, text, false);
+            let tx = right - text_w.max(40.0 * s);
+            ui_text(scene, fonts, (right - text_w).round() as i32, mid, cw, ch, text, k.text, false);
+            let x0 = tx - 16.0 * s - track_w;
+            let th = (2.0 * s).round().max(2.0);
             let track = PxRect { x: x0, y: (mid - th / 2.0).round(), w: track_w, h: th };
-            crate::glass::fill(scene, track, th / 2.0, crate::glass::tint(theme), 30);
+            scene.frect(track, k.track, 255);
             let v = value.clamp(0.0, 1.0);
-            if v > 0.0 {
-                crate::glass::pill(scene, theme, PxRect { w: (track_w * v).max(th), ..track }, th / 2.0, 255, 255);
-            }
-            let knob = (18.0 * s).round();
-            let kx = x0 + track_w * v - knob / 2.0;
-            let kr = PxRect { x: kx, y: (mid - knob / 2.0).round(), w: knob, h: knob };
-            crate::glass::fill(scene, PxRect { y: kr.y + 1.5 * s, ..kr }, knob / 2.0, 0x000000, 60);
-            crate::glass::fill(scene, kr, knob / 2.0, 0xffffff, 255);
-            crate::glass::fill(
-                scene,
-                PxRect { x: kx + knob * 0.32, y: kr.y + knob * 0.32, w: knob * 0.36, h: knob * 0.36 },
-                knob * 0.18,
-                crate::glass::accents(theme).1,
-                255,
-            );
+            scene.frect(PxRect { w: (track_w * v).round(), ..track }, k.accent, 255);
+            let knob = (12.0 * s).round();
+            let kx = (x0 + track_w * v - knob / 2.0).round();
+            crate::glass::fill(scene, PxRect { x: kx, y: (mid - knob / 2.0).round(), w: knob, h: knob }, knob / 2.0, k.text, 255);
             regions.push((PxRect { x: x0 - knob / 2.0, y: r.y, w: track_w + knob, h: r.h }, SettingsHit::Slider(i)));
             x0 - knob / 2.0
         }
         Control::Text { value, editing, placeholder } => {
             let w = (300.0 * s).round().min(r.w * 0.5);
-            let h = (32.0 * s).round();
+            let h = (30.0 * s).round();
             let b = PxRect { x: right - w, y: (mid - h / 2.0).round(), w, h };
-            crate::glass::card(scene, theme, b, 10.0 * s, *editing);
+            crate::glass::fill(scene, b, 6.0 * s, k.field, 255);
             if *editing {
-                crate::glass::ring(scene, b, 10.0 * s, k.accent, 230);
+                crate::glass::ring(scene, b, 6.0 * s, k.accent, 255);
             }
             let (t, fg) = if value.is_empty() { (placeholder.as_str(), k.dim) } else { (value.as_str(), k.text) };
             // show the end of long text while editing
@@ -475,15 +581,16 @@ fn draw_control(
             b.x
         }
         Control::Keys { chips, capturing } => {
-            let h = (26.0 * s).round();
+            let h = (24.0 * s).round();
             let gap = 4.0 * s;
             let mut x = right;
             if *capturing {
                 let t = "Press keys…  Esc cancels · Backspace removes";
                 let tw = ui_width(fonts, cw, t, false);
                 let b = PxRect { x: right - tw - 20.0 * s, y: (mid - h / 2.0).round(), w: tw + 20.0 * s, h };
-                round_outline(scene, b, 4.0 * s, k.accent, k.card);
-                ui_text(scene, fonts, (b.x + 10.0 * s).round() as i32, mid, cw, ch, t, k.accent, false);
+                crate::glass::fill(scene, b, 4.0 * s, k.field, 255);
+                crate::glass::ring(scene, b, 4.0 * s, k.accent, 255);
+                ui_text(scene, fonts, (b.x + 10.0 * s).round() as i32, mid, cw, ch, t, k.text, false);
                 regions.push((b, SettingsHit::Control(i)));
                 return b.x;
             }
@@ -494,12 +601,13 @@ fn draw_control(
                 regions.push((PxRect { x: right - tw - 8.0, y: r.y, w: tw + 8.0, h: r.h }, SettingsHit::Control(i)));
                 return right - tw;
             }
+            let hovered = hover == Some(SettingsHit::Control(i));
             // several bindings: draw right to left, "or" between
             for (bi, combo) in chips.iter().enumerate().rev() {
                 for part in combo.iter().rev() {
                     let tw = ui_width(fonts, cw, part, false).max(10.0 * s);
                     let b = PxRect { x: x - tw - 16.0 * s, y: (mid - h / 2.0).round(), w: tw + 16.0 * s, h };
-                    round_outline(scene, b, 4.0 * s, k.line, blend(theme.background, theme.foreground, 30));
+                    crate::glass::fill(scene, b, 4.0 * s, if hovered { k.field_hover } else { k.field }, 255);
                     let pw = ui_width(fonts, cw, part, false);
                     ui_text(scene, fonts, (b.x + (b.w - pw) / 2.0).round() as i32, mid, cw, ch, part, k.text, false);
                     x = b.x - gap;
@@ -516,7 +624,7 @@ fn draw_control(
         }
         Control::Button(label) => {
             let w = ui_width(fonts, cw, label, false) + 28.0 * s;
-            let h = (32.0 * s).round();
+            let h = (30.0 * s).round();
             let b = PxRect { x: right - w, y: (mid - h / 2.0).round(), w, h };
             button(scene, fonts, cw, ch, k, b, label, hover == Some(SettingsHit::Control(i)), s);
             regions.push((b, SettingsHit::Control(i)));
@@ -630,19 +738,6 @@ pub enum MenuIcon {
     Swatch([u32; 4]),
 }
 
-/// The icon for a Settings page.
-fn page_icon(page: &str) -> &'static str {
-    match page {
-        "Appearance" => "appearance",
-        "Terminal" => "terminal",
-        "Security" => "security",
-        "Profiles" => "profile",
-        "Shortcuts" => "keyboard",
-        "Updates" => "download",
-        _ => "info",
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MenuView {
     pub items: Vec<MenuItem>,
@@ -719,19 +814,14 @@ pub fn menu(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch
     // below the pointer when it fits, else above it, else pinned in
     let y = if m.y + h > scene.height as f32 - 4.0 { (m.y - h).max(4.0) } else { m.y }.round();
     let frame = PxRect { x, y, w, h };
-    // warm, milky, opaque (menus sit on sharp text, so no see-through)
-    let tint = crate::glass::tint(theme);
-    let bg = if tint == 0xffffff { blend(theme.background, 0x05070b, 90) } else { blend(theme.background, theme.foreground, 18) };
-    let radius = 12.0 * s;
-    // soft shadow, body, a light edge, a hint of peach from the top-left
+    // opaque and flat, like Settings (menus sit on sharp text)
+    let radius = 8.0 * s;
     for (g, a) in [(10.0, 14u8), (4.0, 34)] {
         let g = g * s;
         crate::glass::fill(scene, PxRect { x: x - g, y: y - g + 6.0 * s, w: w + 2.0 * g, h: h + 2.0 * g }, radius + g, 0x000000, a);
     }
-    crate::glass::fill(scene, frame, radius, bg, 255);
-    let (a0, a1) = crate::glass::accents(theme);
-    crate::glass::gradient(scene, frame, radius, a1, a0, 18, 0);
-    crate::glass::ring(scene, frame, radius, tint, 46);
+    crate::glass::fill(scene, frame, radius, k.edge, 255);
+    crate::glass::fill(scene, PxRect { x: x + 1.0, y: y + 1.0, w: w - 2.0, h: h - 2.0 }, radius - 1.0, k.surface, 255);
     let mut items = vec![PxRect::default(); m.items.len()];
     let mut iy = y + pad;
     for (i, it) in m.items.iter().enumerate() {
@@ -739,12 +829,12 @@ pub fn menu(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch
             continue;
         }
         if it.separator && i != first {
-            scene.frect(PxRect { x: x + 10.0 * s, y: (iy + sep_h / 2.0).round(), w: w - 20.0 * s, h: 1.0 }, k.line, 255);
+            scene.frect(PxRect { x: x + 10.0 * s, y: (iy + sep_h / 2.0).round(), w: w - 20.0 * s, h: 1.0 }, k.rule, 255);
             iy += sep_h;
         }
         let r = PxRect { x: x + pad, y: iy, w: w - pad * 2.0, h: item_h };
         if m.selected == Some(i) {
-            crate::glass::pill(scene, theme, r, 8.0 * s, 70, 25);
+            crate::glass::fill(scene, r, 5.0 * s, k.selected, 255);
         }
         let mid = r.y + r.h / 2.0;
         match it.icon {
@@ -755,7 +845,7 @@ pub fn menu(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch
                 let (w, h) = ((24.0 * s).round(), (16.0 * s).round());
                 let chip = PxRect { x: (r.x + 7.0 * s).round(), y: (mid - h / 2.0).round(), w, h };
                 crate::glass::fill(scene, chip, 4.0 * s, bg, 255);
-                crate::glass::ring(scene, chip, 4.0 * s, k.line, 255);
+                crate::glass::ring(scene, chip, 4.0 * s, k.edge, 255);
                 let d = (5.0 * s).round();
                 for (n, col) in [a, b, c].into_iter().enumerate() {
                     let dot = PxRect { x: (chip.x + 4.0 * s + n as f32 * (d + 1.5 * s)).round(), y: (mid - d / 2.0).round(), w: d, h: d };

@@ -3259,7 +3259,13 @@ impl Session {
             let about = self.about_info();
             self.settings_ui.scope_text = self.eng.as_ref().map(|e| e.scope.text.join(", ")).unwrap_or_default();
             self.settings_ui.loot_summary = self.eng.as_ref().map(|e| loot_summary(&e.loot_path())).unwrap_or_default();
-            let view = self.settings_ui.view(&self.config, &self.settings, &about);
+            let mut view = self.settings_ui.view(&self.config, &self.settings, &about);
+            // the theme list is open: preview the highlighted theme
+            if let Some(m) = &self.menu {
+                if let Some((_, MenuCmd::Setting(settings::Change::Theme(id)))) = m.selected.and_then(|i| m.items.get(i)) {
+                    view.preview_theme = Some(id.clone());
+                }
+            }
             let content = self.renderer.content_rect(wu, hu, self.tabbar_visible());
             let rect = self.settings_dialog_rect(content);
             self.settings_rect = rect;

@@ -233,4 +233,4 @@ Vibex is dual-licensed under either of
 
 at your option. Unless you say otherwise, any contribution you submit for inclusion is dual-licensed the same way, without any extra terms.
 
-The installer also ships third-party programs under their own licences: OpenConsole (MIT), Neovim (Apache-2.0 and the Vim licence), and GNU nano with its MSYS2 runtime (GPL-3.0 and others). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The installer also ships third-party programs under their own licences: OpenConsole (MIT), Neovim (Apache-2.0 and the Vim licence), PSReadLine (BSD-2-Clause), and GNU nano with its MSYS2 runtime (GPL-3.0 and others). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

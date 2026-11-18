@@ -387,7 +387,7 @@ impl Renderer {
             // a dialog over the (still running, blurred) terminal
             scene.blur(*dim, 14.0 * self.ui_scale.max(0.5));
             scene.frect(*dim, 0x000000, 60);
-            glass::panel(scene, &self.theme, *rect, self.ui_scale.max(0.5));
+            settings_view::sheet(scene, &self.theme, *rect, self.ui_scale.max(0.5));
             out.settings = Some(settings_view::settings(scene, &mut self.fonts, &self.theme, cw, ch, *rect, view, self.ui_scale));
         }
         let top = chrome.tabbar.as_ref().map_or(0.0, |(_, l)| l.height);

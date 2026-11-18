@@ -6,6 +6,11 @@
 # Neovim: the official Windows build (github.com/neovim/neovim releases).
 nvim  0.12.6  4e12b7103b601ffc8f25954b4da100f339faa73dccb69a5b135e897fa3d893ed  https://github.com/neovim/neovim/releases/download/v0.12.6/nvim-win64.zip
 #
+# PSReadLine (Microsoft, BSD 2-Clause), from the PowerShell Gallery: Windows
+# PowerShell 5.1 ships 2.0, which draws typing in the wrong place after the
+# window is resized. Installed in <install>\psmodules, used only by Vibex.
+psreadline  2.4.5  cb9390e9733208456c234a7971d1ec4a917886c239502aab68f4b71aa4bba235  https://cdn.powershellgallery.com/packages/psreadline.2.4.5.nupkg
+#
 # GNU nano has no official Windows build: MSYS2's (the one Git for Windows
 # uses), with the runtime it needs, from the MSYS2 package repository.
 nano            9.3-1     190cdb891a5b54b5b9ba899a587b1a46741e6aa7e51614b9c1724870d058deca  https://mirror.msys2.org/msys/x86_64/nano-9.3-1-x86_64.pkg.tar.zst
