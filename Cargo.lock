@@ -2422,7 +2422,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vibex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2445,11 +2445,11 @@ dependencies = [
 
 [[package]]
 name = "vibex-launcher"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "vibex-pty"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "windows-sys 0.59.0",
@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "vibex-release"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.2.17",
  "vibex-update",
@@ -2465,7 +2465,7 @@ dependencies = [
 
 [[package]]
 name = "vibex-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -2479,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "vibex-setup"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "windows-sys 0.59.0",
  "winresource",
@@ -2487,7 +2487,7 @@ dependencies = [
 
 [[package]]
 name = "vibex-term"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "miniz_oxide 0.8.9",
  "png",
@@ -2498,7 +2498,7 @@ dependencies = [
 
 [[package]]
 name = "vibex-update"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "sha2",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "vibex-vt"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "walkdir"

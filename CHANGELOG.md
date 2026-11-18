@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0: seven styles, a premium look, and Linux-style listings (2026-11-18)
 
 - **The Kali Linux look:**
   - Dragon Dark, Kali's QTerminal colours
