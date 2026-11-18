@@ -172,6 +172,8 @@ pub struct FontSet {
     /// Proportional UI font (Segoe UI on Windows) for tab titles:
     /// regular and semibold slots in `faces`.
     ui: Option<(u16, u16)>,
+    /// UI text size as a share of the terminal font's.
+    ui_scale: f32,
 }
 
 /// A glyph of a UI-font text run, at `x` pixels from the run start.
@@ -181,21 +183,69 @@ pub struct UiGlyph {
     pub x: i32,
 }
 
-/// UI text is drawn a bit smaller than the terminal font.
+/// UI text is drawn a bit smaller than the terminal font (Segoe UI's
+/// size; Inter is larger at the same size, so it gets less).
 const UI_SCALE: f32 = 0.8;
+const INTER_SCALE: f32 = 0.74;
 
-fn ui_font_paths() -> Option<(String, String)> {
+/// Inter (rsms.me/inter, SIL Open Font License; assets/fonts): Vibex's UI
+/// font, built in so it looks the same on every PC.
+static INTER_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
+static INTER_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
+
+/// Where a UI face comes from.
+enum UiSource {
+    Built(&'static [u8]),
+    /// A file, with the weight to set (variable fonts only).
+    File(String, Option<f32>),
+}
+
+/// The UI font: the built-in Inter, else (VIBEX_UI_FONT=segoe) Windows 11's
+/// Segoe UI Variable at 400 and 600, else the classic Segoe UI files. With
+/// the size factor for that font.
+fn ui_font_sources() -> Option<([UiSource; 2], f32)> {
+    if std::env::var("VIBEX_UI_FONT").map_or(true, |v| !v.eq_ignore_ascii_case("segoe")) {
+        return Some(([UiSource::Built(INTER_REGULAR), UiSource::Built(INTER_SEMIBOLD)], INTER_SCALE));
+    }
     #[cfg(windows)]
     {
         let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
         let dir = Path::new(&windir).join("Fonts");
+        let var = dir.join("SegUIVar.ttf");
+        if var.is_file() {
+            let v = var.to_string_lossy().into_owned();
+            return Some(([UiSource::File(v.clone(), Some(400.0)), UiSource::File(v, Some(600.0))], UI_SCALE));
+        }
         let regular = dir.join("segoeui.ttf");
         let semibold = [dir.join("seguisb.ttf"), dir.join("segoeuib.ttf")].into_iter().find(|p| p.is_file())?;
         if regular.is_file() {
-            return Some((regular.to_string_lossy().into_owned(), semibold.to_string_lossy().into_owned()));
+            return Some((
+                [UiSource::File(regular.to_string_lossy().into_owned(), None), UiSource::File(semibold.to_string_lossy().into_owned(), None)],
+                UI_SCALE,
+            ));
         }
     }
     None
+}
+
+fn load_ui(src: &UiSource) -> Option<Face> {
+    match src {
+        UiSource::Built(data) => {
+            let face = rustybuzz::Face::from_slice(data, 0)?;
+            Some(Face { face, has_color: false })
+        }
+        UiSource::File(path, weight) => {
+            let mut f = load_face(path)?;
+            if let Some(w) = weight {
+                use rustybuzz::ttf_parser::Tag;
+                f.face.set_variations(&[
+                    rustybuzz::Variation { tag: Tag::from_bytes(b"wght"), value: *w },
+                    rustybuzz::Variation { tag: Tag::from_bytes(b"opsz"), value: 10.5 },
+                ]);
+            }
+            Some(f)
+        }
+    }
 }
 
 impl FontSet {
@@ -205,12 +255,14 @@ impl FontSet {
         let mut faces = vec![Some(regular), opt(&paths.bold), opt(&paths.italic), opt(&paths.bold_italic)];
         faces.extend(paths.fallbacks.iter().map(|p| load_face(p)).filter(Option::is_some));
         let mut ui = None;
-        if let Some((r, b)) = ui_font_paths() {
-            if let (Some(rf), Some(bf)) = (load_face(&r), load_face(&b)) {
+        let mut ui_scale = UI_SCALE;
+        if let Some(([r, b], k)) = ui_font_sources() {
+            if let (Some(rf), Some(bf)) = (load_ui(&r), load_ui(&b)) {
                 let at = faces.len() as u16;
                 faces.push(Some(rf));
                 faces.push(Some(bf));
                 ui = Some((at, at + 1));
+                ui_scale = k;
             }
         }
         static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -230,6 +282,7 @@ impl FontSet {
             underline_y: 1,
             line_thickness: 1,
             ui,
+            ui_scale,
         };
         set.set_size(size_px);
         Ok(set)
@@ -471,6 +524,22 @@ impl FontSet {
         self.ui.is_some_and(|(r, b)| face == r || face == b)
     }
 
+    /// From a line's middle down to the UI font's baseline, in pixels: the
+    /// band between x-height and cap height centred on the middle.
+    pub fn ui_mid_offset(&self) -> f32 {
+        let (cap, x) = self
+            .ui
+            .and_then(|(r, _)| self.faces[r as usize].as_ref())
+            .map(|f| {
+                let upem = f.face.units_per_em() as f32;
+                let cap = f.face.capital_height().map_or(0.7, |c| c as f32 / upem);
+                let x = f.face.x_height().map_or(0.5, |c| c as f32 / upem);
+                (cap, x)
+            })
+            .unwrap_or((0.7, 0.5));
+        self.size_px * self.ui_scale * (cap + x) / 3.4
+    }
+
     pub fn has_ui_font(&self) -> bool {
         self.ui.is_some()
     }
@@ -481,7 +550,7 @@ impl FontSet {
         let (r, b) = self.ui?;
         let slot = if semibold { b } else { r };
         let f = self.faces[slot as usize].as_ref()?;
-        let scale = f.scale(self.size_px * UI_SCALE);
+        let scale = f.scale(self.size_px * self.ui_scale);
         let mut x = 0.0f32;
         let mut out = Vec::new();
         let mut missing = Vec::new();
@@ -515,7 +584,7 @@ impl FontSet {
                 return g;
             }
         }
-        let px = if self.is_ui_face(key.face) { self.size_px * UI_SCALE } else { self.size_px };
+        let px = if self.is_ui_face(key.face) { self.size_px * self.ui_scale } else { self.size_px };
         let scale = f.scale(px);
         let Some((x0, y0, x1, y1)) = raster::pixel_bounds(&f.face, &[key.id], scale) else {
             return Glyph::empty(key.fake_bold);

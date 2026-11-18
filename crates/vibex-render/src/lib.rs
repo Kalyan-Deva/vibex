@@ -393,10 +393,10 @@ impl Renderer {
         let top = chrome.tabbar.as_ref().map_or(0.0, |(_, l)| l.height);
         let mut y = top as i32 + 10;
         for o in &chrome.overlays {
-            y = scene::overlay(scene, &mut self.fonts, &self.theme, cw, ch, y, o) + 8;
+            y = scene::overlay(scene, &mut self.fonts, &self.theme, cw, ch, y, o, self.ui_scale) + (8.0 * self.ui_scale.max(0.5)) as i32;
         }
         if let Some(p) = &chrome.palette {
-            scene::palette(scene, &mut self.fonts, &self.theme, cw, ch, top, p);
+            scene::palette(scene, &mut self.fonts, &self.theme, cw, ch, top, p, self.ui_scale);
         }
         if let Some(m) = &chrome.menu {
             out.menu = Some(settings_view::menu(scene, &mut self.fonts, &self.theme, cw, ch, m, self.ui_scale));

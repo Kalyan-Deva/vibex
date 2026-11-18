@@ -14,6 +14,11 @@ These programs aren't linked into Vibex. They're shipped beside it, and Vibex ru
 
 The source for each MSYS2 package is in the [MSYS2-packages](https://github.com/msys2/MSYS2-packages) repository and at [mirror.msys2.org/msys/sources](https://mirror.msys2.org/msys/sources/). The installed `tools\LICENSES\SOURCES.txt` lists the exact package versions.
 
+Built into `vibex.exe`:
+
+- **Inter** (the UI font for tabs, menus, Settings and dialogs), [rsms/inter](https://github.com/rsms/inter) v4.1, Copyright 2016 The Inter Project Authors, under the [SIL Open Font License 1.1](assets/fonts/Inter-LICENSE.txt). Terminal text uses your own font.
+- **Lucide icons** (the tab, menu and toolbar icons), [lucide-icons/lucide](https://github.com/lucide-icons/lucide) 1.74.0, Copyright Lucide Icons and Contributors, ISC licence (parts derived from Feather, MIT); see [assets/icons/LUCIDE-LICENSE.txt](assets/icons/LUCIDE-LICENSE.txt). Their SVG paths are copied into `crates/vibex-render/src/icons.rs` and drawn with a 1.5 stroke.
+
 The extra colour themes (Catppuccin, Dracula, Nord, Gruvbox, Rosé Pine, Kanagawa, Everforest, GitHub, Tokyo Night variants and others) come from the [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) collection (MIT, Copyright Mark Badolato; each scheme is its authors' work), Solarized from Ethan Schoonover's published palette, and Campbell from Windows Terminal ([microsoft/terminal](https://github.com/microsoft/terminal), MIT).
 
 The Dragon Dark theme and the Dragon prompt reproduce the colours and prompt of [Kali Linux](https://www.kali.org)'s terminal, taken from its `kali-themes` and `kali-defaults` packages. Kali Linux is a trademark of OffSec Services Limited; Vibex isn't affiliated with or endorsed by OffSec or Kali Linux, and ships none of their logos.

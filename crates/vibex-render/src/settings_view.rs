@@ -162,10 +162,6 @@ pub(crate) struct Ink {
     pub(crate) accent: u32,
     pub(crate) on_accent: u32,
     pub(crate) warn: u32,
-    // kept for the confirm dialog
-    card: u32,
-    card_hover: u32,
-    line: u32,
 }
 
 /// The theme's own accent: its blue (or cyan, or the text colour), whichever
@@ -201,9 +197,6 @@ pub(crate) fn ink(theme: &Theme) -> Ink {
         accent,
         on_accent: Theme::text_on(accent),
         warn: crate::theme::readable_on(theme.palette[1], surface, 3.0),
-        card: blend(surface, fg, 14),
-        card_hover: blend(surface, fg, 26),
-        line: blend(surface, fg, 60),
     }
 }
 
@@ -671,20 +664,26 @@ pub fn confirm(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize,
     let x = (area.x + (area.w - w) / 2.0).round();
     let y = (area.y + (area.h - h) / 2.5).max(area.y + 8.0).round();
     let frame = PxRect { x, y, w, h };
-    scene.frect(area, 0x000000, 90);
-    round_rect(scene, PxRect { x: x + 2.0, y: y + 5.0 * s, w, h }, 10.0 * s, 0x000000, 110);
-    round_rect(scene, PxRect { x: x - 1.0, y: y - 1.0, w: w + 2.0, h: h + 2.0 }, 10.0 * s, k.line, 255);
-    round_rect(scene, frame, 9.0 * s, theme.background, 255);
+    scene.frect(area, 0x000000, 110);
+    sheet(scene, theme, frame, s);
     let mut cy = y + pad + 10.0 * s;
     ui_text(scene, fonts, (x + pad) as i32, cy, cw, ch, &v.title, k.text, true);
     cy += 22.0 * s;
     if !shown.is_empty() {
+        // the command (and why it asks) in the terminal font, on a field
         let box_r = PxRect { x: x + pad - 8.0 * s, y: cy - 2.0, w: w - 2.0 * pad + 16.0 * s, h: shown.len() as f32 * line_h + 10.0 * s };
-        round_rect(scene, box_r, 6.0 * s, k.card, 255);
+        crate::glass::fill(scene, box_r, 6.0 * s, k.field, 255);
         let mut ly = cy + 4.0 * s;
-        for l in &shown {
+        for (n, l) in shown.iter().enumerate() {
             let base = ly as i32 + fonts.baseline;
-            crate::scene::text_run(scene, fonts, (x + pad) as i32, base, cw, l, theme.foreground, crate::font::Style::Regular);
+            let fg = if n == 0 {
+                theme.foreground
+            } else if l.starts_with("It ") && v.danger {
+                k.warn
+            } else {
+                k.dim
+            };
+            crate::scene::text_run(scene, fonts, (x + pad) as i32, base, cw, l, fg, crate::font::Style::Regular);
             ly += line_h;
         }
         cy += shown.len() as f32 * line_h + 14.0 * s;
@@ -695,18 +694,13 @@ pub fn confirm(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize,
     let yes = PxRect { x: x + w - pad - yw, y: by, w: yw, h: btn_h };
     let no = PxRect { x: yes.x - 10.0 * s - nw, y: by, w: nw, h: btn_h };
     let yes_bg = if v.danger { 0xc42b1c } else { k.accent };
-    round_rect(scene, yes, 6.0 * s, yes_bg, 255);
-    round_rect(scene, no, 6.0 * s, k.card_hover, 255);
+    crate::glass::fill(scene, yes, 6.0 * s, yes_bg, 255);
+    crate::glass::fill(scene, no, 6.0 * s, k.field_hover, 255);
+    // the keyboard's button: a ring in the accent, just outside it
     let focus = if v.yes_focused { yes } else { no };
-    let ring = PxRect { x: focus.x - 2.0, y: focus.y - 2.0, w: focus.w + 4.0, h: focus.h + 4.0 };
-    for r in [
-        PxRect { h: 1.0, ..ring },
-        PxRect { y: ring.y + ring.h - 1.0, h: 1.0, ..ring },
-        PxRect { w: 1.0, ..ring },
-        PxRect { x: ring.x + ring.w - 1.0, w: 1.0, ..ring },
-    ] {
-        scene.frect(r, k.text, 200);
-    }
+    let ring = PxRect { x: focus.x - 3.0 * s, y: focus.y - 3.0 * s, w: focus.w + 6.0 * s, h: focus.h + 6.0 * s };
+    crate::glass::ring(scene, ring, 8.0 * s, k.accent, 255);
+    crate::glass::ring(scene, PxRect { x: ring.x + 1.0, y: ring.y + 1.0, w: ring.w - 2.0, h: ring.h - 2.0 }, 7.0 * s, k.accent, 255);
     let center = |fonts: &mut FontSet, scene: &mut Scene, r: PxRect, label: &str, fg: u32| {
         let tw = ui_width(fonts, cw, label, false);
         ui_text(scene, fonts, (r.x + (r.w - tw) / 2.0).round() as i32, r.y + r.h / 2.0, cw, ch, label, fg, false);

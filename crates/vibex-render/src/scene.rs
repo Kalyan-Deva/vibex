@@ -677,25 +677,32 @@ pub(crate) fn wrap_text(text: &str, cols: usize) -> Vec<String> {
     out
 }
 
-pub fn overlay(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, y: i32, o: &Overlay) -> i32 {
-    let pad = cw as i32;
-    let max_w = scene.width.saturating_sub(28);
-    // a long message wraps to the window instead of running off its edge
-    let fit_cols = (max_w.saturating_sub(pad as usize * 2) / cw.max(1)).max(8);
-    let wrapped = wrap_text(&o.text, fit_cols);
-    let lines: Vec<&str> = wrapped.iter().map(|s| s.as_str()).collect();
-    let widest = lines.iter().map(|l| crate::text_width(l)).max().unwrap_or(0);
-    let w = (widest * cw + pad as usize * 2).min(max_w);
-    let h = lines.len().max(1) * ch + 10;
-    let x = scene.width as i32 - w as i32 - 14;
-    scene.rect(x - 1, y - 1, w + 2, h + 2, o.border);
-    scene.rect(x, y, w, h, blend(theme.background, theme.foreground, 22));
-    let baseline = fonts.baseline;
+/// A notice in the top-right corner (toasts): a small sheet in the UI font,
+/// a stripe in its colour on the left. Returns its bottom edge.
+#[allow(clippy::too_many_arguments)]
+pub fn overlay(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, y: i32, o: &Overlay, scale: f32) -> i32 {
+    let s = scale.max(0.5);
+    let k = crate::settings_view::ink(theme);
+    let pad = (14.0 * s).round();
+    let max_w = (scene.width as f32 - 28.0).min(520.0 * s);
+    // a long message wraps to the box instead of running off the window
+    let avg = (ui_width(fonts, cw, "abcdefghijklmnopqrstuvwxyz", false) / 26.0).max(1.0);
+    let fit_cols = (((max_w - pad * 2.0 - 4.0 * s) / avg) as usize).max(8);
+    let lines = wrap_text(&o.text, fit_cols);
+    let widest = lines.iter().map(|l| ui_width(fonts, cw, l, false)).fold(0.0, f32::max);
+    let line_h = (22.0 * s).round();
+    let w = (widest + pad * 2.0 + 4.0 * s).min(max_w).round();
+    let h = (lines.len().max(1) as f32 * line_h + 16.0 * s).round();
+    let x = (scene.width as f32 - w - 14.0 * s).round();
+    let r = PxRect { x, y: y as f32, w, h };
+    crate::settings_view::sheet(scene, theme, r, s * 0.8);
+    // the notice's colour, as a stripe
+    crate::glass::fill(scene, PxRect { x: x + 6.0 * s, y: r.y + 8.0 * s, w: (3.0 * s).round(), h: h - 16.0 * s }, 1.5 * s, o.border, 255);
     for (i, line) in lines.iter().enumerate() {
-        let ly = y + 5 + (i * ch) as i32 + baseline;
-        text_run(scene, fonts, x + pad, ly, cw, line, theme.foreground, Style::Regular);
+        let mid = r.y + 8.0 * s + line_h * (i as f32 + 0.5);
+        ui_text(scene, fonts, (x + pad + 4.0 * s).round() as i32, mid, cw, ch, line, k.text, false);
     }
-    y + h as i32
+    (r.y + h) as i32
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -856,7 +863,7 @@ pub(crate) fn ui_text(scene: &mut Scene, fonts: &mut FontSet, x: i32, mid_y: f32
     match fonts.ui_run(text, bold) {
         Some((glyphs, w)) => {
             // centre the x-height-ish band on mid_y
-            let baseline = (mid_y + fonts.size_px() * 0.8 * 0.36).round() as i32;
+            let baseline = (mid_y + fonts.ui_mid_offset()).round() as i32;
             for g in glyphs {
                 scene.glyph(x + g.x, baseline, g.key, fg);
             }
@@ -931,14 +938,15 @@ pub fn classic_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: us
             _ => (if hot { blend(bar_bg, theme.foreground, 70) } else { blend(bar_bg, theme.foreground, 34) }, text),
         };
         crate::glass::fill(scene, c, d / 2.0, fill, 255);
-        let (cx, cy) = (c.x + d / 2.0, c.y + d / 2.0);
-        let k = (3.5 * s).round();
-        match hit {
-            TabHit::Close => draw_thin_x(scene, PxRect { x: cx - k - 1.0, y: cy - k - 1.0, w: 2.0 * k + 2.0, h: 2.0 * k + 2.0 }, k, mark),
-            TabHit::Minimize if hot => scene.frect(PxRect { x: cx - k, y: cy, w: 2.0 * k, h: (1.5 * s).round().max(1.0) }, mark, 255),
-            TabHit::Maximize if hot => outline(scene, PxRect { x: cx - k, y: cy - k, w: 2.0 * k, h: 2.0 * k }, mark),
-            _ => {}
-        }
+        // the glyphs always show (centred), the hovered button brightens
+        let kind = match hit {
+            TabHit::Close => Glyph::Close,
+            TabHit::Minimize => Glyph::Minimize,
+            _ if bar.maximized => Glyph::Restore,
+            _ => Glyph::Maximize,
+        };
+        let mark = if hot || hit == TabHit::Close { mark } else { blend(fill, mark, 200) };
+        caption_glyph(scene, kind, c, 7.0 * s, 1.0, mark);
     }
 
     // the menu bar
@@ -1034,34 +1042,7 @@ pub fn titled_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usi
             let room = (width - 3.0 * (crate::tabbar::BUTTON_W * s) - 52.0 * s).max(40.0 * s);
             let t = fit(fonts, cw, &title, false, room);
             ui_text(scene, fonts, (36.0 * s).round() as i32, mid, cw, ch, &t, text, false);
-            for hit in [TabHit::Minimize, TabHit::Maximize, TabHit::Close] {
-                let Some(r) = l.rect(hit) else { continue };
-                let hot = bar.hover == Some(hit);
-                let mark = if hot && hit == TabHit::Close { 0xffffff } else { text };
-                if hot {
-                    if hit == TabHit::Close {
-                        scene.frect(r, 0xc42b1c, 255);
-                    } else {
-                        scene.frect(r, if light { 0x000000 } else { 0xffffff }, 24);
-                    }
-                }
-                let (cx, cy) = ((r.x + r.w / 2.0).round(), (r.y + r.h / 2.0).round());
-                let k = (5.0 * s).round();
-                match hit {
-                    TabHit::Minimize => scene.frect(PxRect { x: cx - k, y: cy, w: 2.0 * k, h: 1.0 }, mark, 255),
-                    TabHit::Maximize if bar.maximized => {
-                        outline(scene, PxRect { x: cx - k + 2.0, y: cy - k, w: 2.0 * k - 2.0, h: 2.0 * k - 2.0 }, mark);
-                        scene.frect(
-                            PxRect { x: cx - k, y: cy - k + 2.0, w: 2.0 * k - 2.0, h: 2.0 * k - 2.0 },
-                            if hot { blend(bar_bg, mark, 24) } else { bar_bg },
-                            255,
-                        );
-                        outline(scene, PxRect { x: cx - k, y: cy - k + 2.0, w: 2.0 * k - 2.0, h: 2.0 * k - 2.0 }, mark);
-                    }
-                    TabHit::Maximize => outline(scene, PxRect { x: cx - k, y: cy - k, w: 2.0 * k, h: 2.0 * k }, mark),
-                    _ => draw_thin_x(scene, PxRect { x: cx - k - 1.0, y: cy - k - 1.0, w: 2.0 * k + 2.0, h: 2.0 * k + 2.0 }, k, mark),
-                }
-            }
+            windows_buttons(scene, theme, bar, l, s, bar_bg, text);
         }
         BarKind::Gnome => {
             // a centred bold title, flat round buttons, + on the left
@@ -1077,21 +1058,20 @@ pub fn titled_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usi
                 let c = PxRect { x: (r.x + (r.w - d) / 2.0).round(), y: (mid - d / 2.0).round(), w: d, h: d };
                 let hot = bar.hover == Some(hit);
                 crate::glass::fill(scene, c, d / 2.0, if hot { btn_hot } else { btn }, 255);
-                let (cx, cy) = (c.x + d / 2.0, c.y + d / 2.0);
-                let k = (4.0 * s).round();
-                match hit {
-                    TabHit::Minimize => scene.frect(PxRect { x: cx - k, y: (cy + k / 2.0).round(), w: 2.0 * k, h: (1.5 * s).round().max(1.0) }, text, 255),
-                    TabHit::Maximize => outline(scene, PxRect { x: (cx - k).round(), y: (cy - k).round(), w: 2.0 * k, h: 2.0 * k }, text),
-                    _ => draw_thin_x(scene, PxRect { x: cx - k - 1.0, y: cy - k - 1.0, w: 2.0 * k + 2.0, h: 2.0 * k + 2.0 }, k, text),
-                }
+                // Adwaita's symbolic glyphs: 8px, 1.5px lines, centred
+                let kind = match hit {
+                    TabHit::Minimize => Glyph::Minimize,
+                    TabHit::Maximize if bar.maximized => Glyph::Restore,
+                    TabHit::Maximize => Glyph::Maximize,
+                    _ => Glyph::Close,
+                };
+                caption_glyph(scene, kind, c, 8.0 * s, (1.5 * s).round().max(1.0), text);
             }
             if let Some(r) = l.rect(TabHit::NewTab) {
                 if bar.hover == Some(TabHit::NewTab) {
                     crate::glass::fill(scene, r, 6.0 * s, btn_hot, 255);
                 }
-                let (cx, cy, k) = ((r.x + r.w / 2.0).round(), (r.y + r.h / 2.0).round(), (6.0 * s).round());
-                scene.frect(PxRect { x: cx - k, y: cy, w: 2.0 * k, h: (1.5 * s).round().max(1.0) }, text, 255);
-                scene.frect(PxRect { x: cx, y: cy - k, w: (1.5 * s).round().max(1.0), h: 2.0 * k }, text, 255);
+                caption_glyph(scene, Glyph::Plus, r, 12.0 * s, (1.5 * s).round().max(1.0), text);
             }
         }
         _ => {
@@ -1110,17 +1090,13 @@ pub fn titled_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usi
                 crate::glass::fill(scene, inner, (d - 1.0) / 2.0, fill, 255);
                 // the glyphs show while the pointer is over any of them
                 if any_hot {
-                    let (cx, cy) = (c.x + d / 2.0, c.y + d / 2.0);
-                    let k = (2.5 * s).round();
                     let mark = blend(fill, 0x000000, 150);
-                    match hit {
-                        TabHit::Close => draw_thin_x(scene, PxRect { x: cx - k - 1.0, y: cy - k - 1.0, w: 2.0 * k + 2.0, h: 2.0 * k + 2.0 }, k, mark),
-                        TabHit::Minimize => scene.frect(PxRect { x: cx - k, y: cy.round(), w: 2.0 * k, h: 1.0 }, mark, 255),
-                        _ => {
-                            scene.frect(PxRect { x: cx - k, y: cy.round(), w: 2.0 * k, h: 1.0 }, mark, 255);
-                            scene.frect(PxRect { x: cx.round(), y: cy - k, w: 1.0, h: 2.0 * k }, mark, 255);
-                        }
-                    }
+                    let kind = match hit {
+                        TabHit::Close => Glyph::Close,
+                        TabHit::Minimize => Glyph::Minimize,
+                        _ => Glyph::Plus,
+                    };
+                    caption_glyph(scene, kind, c, 6.0 * s, 1.0, mark);
                 }
             }
         }
@@ -1266,23 +1242,33 @@ pub fn tab_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize,
             scene.frect(PxRect { x: end as f32 + 5.0 * s, y: (mid - d / 2.0).round(), w: d, h: d }, theme.palette[1], 255);
         }
         if let Some(c) = close {
-            if bar.hover == Some(TabHit::CloseTab(i)) {
+            let hot = bar.hover == Some(TabHit::CloseTab(i));
+            if hot {
                 let bg = if tab.active { blend(theme.background, theme.foreground, 26) } else { blend(hover_bg, theme.foreground, 18) };
-                scene.frect(c, bg, 255);
+                crate::glass::fill(scene, c, 4.0 * s, bg, 255);
             }
-            draw_thin_x(scene, c, close_half, fg);
+            // quiet until the tab (or the ✕) is under the pointer
+            let ink = if hot || hovered || tab.active { fg } else { blend(bar_bg, fg, 150) };
+            draw_thin_x(scene, c, close_half, ink);
         }
     }
 
     for hit in [TabHit::NewTab, TabHit::NewTabMenu] {
         let Some(r) = l.rect(hit) else { continue };
-        if bar.hover == Some(hit) {
-            round_top_rect(scene, r, (4.0 * s).round(), hover_bg, 255);
-            round_top_rect(scene, PxRect { y: r.y + r.h - 1.0, h: 1.0, ..r }, 0.0, hover_bg, 255);
+        let hot = bar.hover == Some(hit);
+        if hot {
+            // a rounded pill, inset from the strip's edges
+            let ph = (r.h - 4.0 * s).min(30.0 * s).round();
+            let pill = PxRect { x: r.x + 2.0 * s, y: (r.y + (r.h - ph) / 2.0).round(), w: r.w - 4.0 * s, h: ph };
+            crate::glass::fill(scene, pill, 6.0 * s, hover_bg, 255);
         }
-        let (cx, cy) = ((r.x + r.w / 2.0).round(), (r.y + r.h / 2.0).round());
-        let name = if hit == TabHit::NewTab { "plus" } else { "chevron-down" };
-        crate::icons::draw(scene, name, cx, cy, if hit == TabHit::NewTab { 18.0 } else { 15.0 } * s, text_on);
+        let ink = if hot { text_on } else { blend(bar_bg, text_on, 215) };
+        if hit == TabHit::NewTab {
+            caption_glyph(scene, Glyph::Plus, r, 12.0 * s, s.floor().max(1.0), ink);
+        } else {
+            let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            crate::icons::draw(scene, "chevron-down", cx, cy, 15.0 * s, ink);
+        }
     }
 
     if let Some(caption) = &bar.caption {
@@ -1296,43 +1282,110 @@ pub fn tab_bar(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize,
         }
     }
 
-    // window buttons: thin 10px glyphs like Windows' own
-    let icon = (10.0 * s).round();
+    windows_buttons(scene, theme, bar, l, s, bar_bg, text_on);
+}
+
+/// Windows 11's caption buttons: 10px glyphs (scaled), a soft fill on
+/// hover, red under the ✕.
+pub(crate) fn windows_buttons(scene: &mut Scene, theme: &Theme, bar: &TabBar, l: &TabBarLayout, s: f32, bar_bg: u32, fg: u32) {
+    let light = theme.is_light();
     for hit in [TabHit::Minimize, TabHit::Maximize, TabHit::Close] {
         let Some(r) = l.rect(hit) else { continue };
         let hovered = bar.hover == Some(hit);
-        let mut fg = text_on;
+        let mut mark = blend(bar_bg, fg, 230);
         if hovered {
             if hit == TabHit::Close {
                 scene.frect(r, 0xc42b1c, 255);
-                fg = 0xffffff;
+                mark = 0xffffff;
             } else {
-                scene.frect(r, hover_bg, 255);
+                scene.frect(r, if light { 0x000000 } else { 0xffffff }, if light { 16 } else { 20 });
+                mark = fg;
             }
         }
-        let (cx, cy) = ((r.x + r.w / 2.0).round(), (r.y + r.h / 2.0).round());
-        let half = (icon / 2.0).round();
-        match hit {
-            TabHit::Minimize => scene.frect(PxRect { x: cx - half, y: cy, w: icon, h: 1.0 }, fg, 255),
-            TabHit::Maximize if bar.maximized => {
-                let sq = icon - (2.0 * s).round();
-                let off = (2.0 * s).round();
-                outline(scene, PxRect { x: cx - half + off, y: cy - half, w: sq, h: sq }, fg);
-                scene.frect(PxRect { x: cx - half, y: cy - half + off, w: sq, h: sq }, if hovered { hover_bg } else { bar_bg }, 255);
-                outline(scene, PxRect { x: cx - half, y: cy - half + off, w: sq, h: sq }, fg);
+        let kind = match hit {
+            TabHit::Minimize => Glyph::Minimize,
+            TabHit::Maximize if bar.maximized => Glyph::Restore,
+            TabHit::Maximize => Glyph::Maximize,
+            _ => Glyph::Close,
+        };
+        caption_glyph(scene, kind, r, 10.0 * s, s.floor().max(1.0), mark);
+    }
+}
+
+/// A window-button glyph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Glyph {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+    Plus,
+}
+
+/// `kind` drawn `size` px square, exactly centred in `r` (the glyph box is
+/// snapped to whole pixels with the same parity as the button, so it never
+/// sits half a pixel off), lines `stroke` px: crisp straight edges, an
+/// anti-aliased ✕.
+pub(crate) fn caption_glyph(scene: &mut Scene, kind: Glyph, r: PxRect, size: f32, stroke: f32, c: u32) {
+    let (rw, rh) = (r.w.round() as i32, r.h.round() as i32);
+    let mut n = size.round().max(4.0) as i32;
+    if (rw - n) % 2 != 0 {
+        n -= 1;
+    }
+    let t = stroke.round().max(1.0) as i32;
+    let x0 = r.x.round() as i32 + (rw - n) / 2;
+    // the box's vertical centre on the button's (the bar's parity decides)
+    let y0 = r.y.round() as i32 + (rh - n) / 2;
+    let rect = |scene: &mut Scene, x: i32, y: i32, w: i32, h: i32| scene.frect(PxRect { x: x as f32, y: y as f32, w: w as f32, h: h as f32 }, c, 255);
+    let frame = |scene: &mut Scene, x: i32, y: i32, w: i32, h: i32| {
+        rect(scene, x, y, w, t);
+        rect(scene, x, y + h - t, w, t);
+        rect(scene, x, y, t, h);
+        rect(scene, x + w - t, y, t, h);
+    };
+    match kind {
+        Glyph::Minimize => rect(scene, x0, r.y.round() as i32 + (rh - t) / 2, n, t),
+        Glyph::Maximize => frame(scene, x0, y0, n, n),
+        Glyph::Restore => {
+            // the window behind: its top and right edges; the front one whole
+            let o = (n as f32 * 0.2).round().max(2.0) as i32;
+            rect(scene, x0 + o, y0, n - o, t);
+            rect(scene, x0 + n - t, y0, t, n - o);
+            frame(scene, x0, y0 + o, n - o, n - o);
+        }
+        Glyph::Close | Glyph::Plus => {
+            let (bx, by, nf, half) = (x0 as f32, y0 as f32, n as f32, t as f32 / 2.0);
+            let segs: [((f32, f32), (f32, f32)); 2] = if kind == Glyph::Close {
+                [((bx + half, by + half), (bx + nf - half, by + nf - half)), ((bx + nf - half, by + half), (bx + half, by + nf - half))]
+            } else {
+                let m = nf / 2.0;
+                [((bx, by + m), (bx + nf, by + m)), ((bx + m, by), (bx + m, by + nf))]
+            };
+            for py in (y0 - 1)..=(y0 + n) {
+                for px in (x0 - 1)..=(x0 + n) {
+                    let p = (px as f32 + 0.5, py as f32 + 0.5);
+                    let d = segs.iter().map(|&(a, b)| point_seg(p, a, b)).fold(f32::MAX, f32::min);
+                    let cov = (half + 0.5 - d).clamp(0.0, 1.0);
+                    if cov > 0.0 {
+                        hspan(scene, px as f32, px as f32 + 1.0, py, c, (cov * 255.0).round() as u8);
+                    }
+                }
             }
-            TabHit::Maximize => outline(scene, PxRect { x: cx - half, y: cy - half, w: icon, h: icon }, fg),
-            TabHit::Close => draw_thin_x(scene, r, half, fg),
-            _ => {}
         }
     }
 }
 
+fn point_seg(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (vx, vy) = (b.0 - a.0, b.1 - a.1);
+    let (wx, wy) = (p.0 - a.0, p.1 - a.1);
+    let len2 = vx * vx + vy * vy;
+    let t = if len2 > 0.0 { ((wx * vx + wy * vy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    ((wx - t * vx).powi(2) + (wy - t * vy).powi(2)).sqrt()
+}
+
 /// A thin ✕ centred in `r`, arms `half` long.
 pub(crate) fn draw_thin_x(scene: &mut Scene, r: PxRect, half: f32, c: u32) {
-    let (cx, cy) = ((r.x + r.w / 2.0).round(), (r.y + r.h / 2.0).round());
-    line(scene, cx - half, cy - half, cx + half, cy + half, c);
-    line(scene, cx - half, cy + half, cx + half, cy - half, c);
+    caption_glyph(scene, Glyph::Close, r, 2.0 * half, 1.0, c);
 }
 
 pub(crate) fn outline(scene: &mut Scene, r: PxRect, c: u32) {
@@ -1342,55 +1395,78 @@ pub(crate) fn outline(scene: &mut Scene, r: PxRect, c: u32) {
     scene.frect(PxRect { x: r.x + r.w - 1.0, w: 1.0, ..r }, c, 255);
 }
 
-/// The command palette: a centred box with a query line and a list.
-pub fn palette(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, top: f32, p: &PaletteView) {
-    // the highlighted row uses the selection colour: readable, as in panes
-    let drawn = theme.for_drawing();
-    let theme = &drawn;
-    let max_rows = 12usize;
-    let w = ((64 * cw) as f32).min(scene.width as f32 - 40.0).max(cw as f32 * 20.0);
-    let x = ((scene.width as f32 - w) / 2.0).round();
-    let row_h = ch as f32 + 6.0;
-    let shown = p.items.len().min(max_rows);
-    let h = row_h * (shown as f32 + 1.0) + 14.0;
-    let y = top + 12.0;
-    let bg = blend(theme.background, theme.foreground, 20);
-    // shadow + frame
-    scene.frect(PxRect { x: x + 3.0, y: y + 4.0, w, h }, 0x000000, 90);
-    scene.frect(PxRect { x: x - 1.0, y: y - 1.0, w: w + 2.0, h: h + 2.0 }, theme.cursor, 255);
-    scene.frect(PxRect { x, y, w, h }, bg, 255);
+/// Key chips for a shortcut hint ("Ctrl+Shift+P", "Leader U"), drawn right
+/// to left ending at `right`; returns their left edge.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn key_chips(scene: &mut Scene, fonts: &mut FontSet, cw: usize, ch: usize, hint: &str, right: f32, mid: f32, s: f32, bg: u32, fg: u32) -> f32 {
+    let mut x = right;
+    let h = (22.0 * s).round();
+    let parts: Vec<&str> = hint.split(['+', ' ']).filter(|p| !p.is_empty()).collect();
+    for part in parts.iter().rev() {
+        let tw = ui_width(fonts, cw, part, false);
+        let w = (tw + 12.0 * s).max(h);
+        let r = PxRect { x: (x - w).round(), y: (mid - h / 2.0).round(), w: w.round(), h };
+        crate::glass::fill(scene, r, 4.0 * s, bg, 255);
+        ui_text(scene, fonts, (r.x + (r.w - tw) / 2.0).round() as i32, mid, cw, ch, part, fg, false);
+        x = r.x - 4.0 * s;
+    }
+    x
+}
 
-    let cells = ((w - cw as f32 * 3.0) / cw as f32) as usize;
-    let fb = fonts.baseline;
-    let base = |ry: f32| (ry + (row_h - ch as f32) / 2.0).round() as i32 + fb;
-    // query line
-    let qy = y + 6.0;
-    let prompt_end = text_run(scene, fonts, (x + cw as f32).round() as i32, base(qy), cw, "❯ ", theme.cursor, Style::Bold);
-    let q = if p.query.is_empty() { "type a command…".to_string() } else { format!("{}_", p.query) };
-    let qfg = if p.query.is_empty() { blend(bg, theme.foreground, 120) } else { theme.foreground };
-    text_run(scene, fonts, prompt_end, base(qy), cw, &truncate(&q, cells.saturating_sub(2)), qfg, Style::Regular);
-    scene.frect(PxRect { x: x + 6.0, y: qy + row_h + 1.0, w: w - 12.0, h: 1.0 }, blend(bg, theme.foreground, 40), 255);
+/// The command palette: a sheet under the tab bar with a search line and
+/// the matching commands, their shortcuts as key chips.
+#[allow(clippy::too_many_arguments)]
+pub fn palette(scene: &mut Scene, fonts: &mut FontSet, theme: &Theme, cw: usize, ch: usize, top: f32, p: &PaletteView, scale: f32) {
+    let s = scale.max(0.5);
+    let k = crate::settings_view::ink(theme);
+    let max_rows = 10usize;
+    let w = (640.0 * s).min(scene.width as f32 - 32.0).max((320.0 * s).min(scene.width as f32 - 16.0)).round();
+    let x = ((scene.width as f32 - w) / 2.0).round();
+    let row_h = (34.0 * s).round();
+    let query_h = (48.0 * s).round();
+    let shown = p.items.len().min(max_rows).max(1);
+    let h = (query_h + 1.0 + 12.0 * s + row_h * shown as f32).round();
+    let y = (top + 14.0 * s).round();
+    crate::settings_view::sheet(scene, theme, PxRect { x, y, w, h }, s);
+
+    // the search line
+    let qmid = y + query_h / 2.0;
+    crate::icons::draw(scene, "search", x + 24.0 * s, qmid, 16.0 * s, k.dim);
+    let tx = (x + 44.0 * s).round() as i32;
+    let room = w - 64.0 * s;
+    let end = if p.query.is_empty() {
+        // the caret just before the placeholder, not over its first letter
+        ui_text(scene, fonts, tx + (4.0 * s).round() as i32, qmid, cw, ch, "Type a command", k.dim, false);
+        tx
+    } else {
+        let q = fit(fonts, cw, &p.query, false, room);
+        ui_text(scene, fonts, tx, qmid, cw, ch, &q, k.text, false)
+    };
+    scene.frect(PxRect { x: end as f32 + 1.0, y: (qmid - 9.0 * s).round(), w: (1.0 * s).round().max(1.0), h: (18.0 * s).round() }, k.accent, 255);
+    scene.frect(PxRect { x: x + 1.0, y: y + query_h, w: w - 2.0, h: 1.0 }, k.rule, 255);
 
     // keep the selection in view
     let first = p.selected.saturating_sub(max_rows - 1);
-    for (row, i) in (first..p.items.len()).take(max_rows).enumerate() {
+    let mut ry = y + query_h + 1.0 + 6.0 * s;
+    for i in (first..p.items.len()).take(max_rows) {
         let (label, hint) = &p.items[i];
-        let ry = qy + row_h * (row as f32 + 1.0) + 4.0;
+        let r = PxRect { x: x + 6.0 * s, y: ry, w: w - 12.0 * s, h: row_h };
         let selected = i == p.selected;
         if selected {
-            scene.frect(PxRect { x: x + 4.0, y: ry, w: w - 8.0, h: row_h }, theme.selection, 255);
+            crate::glass::fill(scene, r, 6.0 * s, k.selected, 255);
         }
-        let hint_w = crate::text_width(hint);
-        let label_cells = cells.saturating_sub(hint_w + 2);
-        text_run(scene, fonts, (x + cw as f32).round() as i32, base(ry), cw, &truncate(label, label_cells), theme.foreground, Style::Regular);
-        if !hint.is_empty() {
-            let hx = (x + w - cw as f32 * (hint_w as f32 + 1.0)).round() as i32;
-            text_run(scene, fonts, hx, base(ry), cw, hint, blend(bg, theme.foreground, 130), Style::Regular);
-        }
+        let mid = r.y + r.h / 2.0;
+        let left = if hint.is_empty() {
+            r.x + r.w
+        } else {
+            key_chips(scene, fonts, cw, ch, hint, r.x + r.w - 8.0 * s, mid, s, if selected { k.field_hover } else { k.field }, k.dim)
+        };
+        let lbl = fit(fonts, cw, label, false, left - r.x - 28.0 * s);
+        ui_text(scene, fonts, (r.x + 12.0 * s).round() as i32, mid, cw, ch, &lbl, if selected { k.text } else { blend(k.surface, k.text, 220) }, false);
+        ry += row_h;
     }
     if p.items.is_empty() {
-        let ry = qy + row_h + 4.0;
-        text_run(scene, fonts, (x + cw as f32).round() as i32, base(ry), cw, "no matching commands", blend(bg, theme.foreground, 120), Style::Regular);
+        ui_text(scene, fonts, (x + 18.0 * s).round() as i32, ry + row_h / 2.0, cw, ch, "No matching commands", k.dim, false);
     }
 }
 

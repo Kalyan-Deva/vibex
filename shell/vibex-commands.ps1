@@ -354,6 +354,123 @@ if (-not (__vx_gnu grep)) {
 
 # ------------------------------------------------------------ files
 
+# Colours for file listings, as on Linux: folders blue, programs and
+# scripts green, archives red, images magenta, audio cyan. Only when
+# LS_COLORS isn't set already (the Dragon style sets Kali's own below).
+if (-not $env:LS_COLORS -and $env:VIBEX_PROMPT -ne 'dragon') {
+    $__vxc = @('di=01;34', 'ln=01;36', 'so=01;35', 'pi=40;33', 'ex=01;32', 'bd=40;33;01', 'cd=40;33;01', 'or=40;31;01', 'mi=00', 'su=37;41', 'sg=30;43', 'tw=30;42', 'ow=34;42', 'st=37;44')
+    foreach ($e in 'exe', 'com', 'bat', 'cmd', 'ps1', 'psm1', 'msi', 'sh', 'py', 'appimage') { $__vxc += "*.$e=01;32" }
+    foreach ($e in 'zip', 'tar', 'tgz', 'gz', 'bz2', 'xz', 'zst', '7z', 'rar', 'cab', 'iso', 'img', 'jar', 'deb', 'rpm', 'nupkg', 'whl', 'apk') { $__vxc += "*.$e=01;31" }
+    foreach ($e in 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'webp', 'ico', 'tif', 'tiff', 'heic', 'psd', 'mp4', 'mkv', 'mov', 'avi', 'webm') { $__vxc += "*.$e=01;35" }
+    foreach ($e in 'mp3', 'flac', 'wav', 'ogg', 'm4a', 'opus', 'aac') { $__vxc += "*.$e=00;36" }
+    $env:LS_COLORS = ($__vxc -join ':') + ':'
+    Remove-Variable __vxc
+}
+
+# LS_COLORS as a table: type codes (di, ln, ex) and *.ext.
+function global:__vx_lscolors {
+    if ($global:__VibexLsKey -ne $env:LS_COLORS) {
+        $t = @{}
+        foreach ($e in "$env:LS_COLORS".Split(':')) {
+            $kv = $e.Split('=', 2)
+            if ($kv.Count -eq 2 -and $kv[1]) { $t[$kv[0].ToLowerInvariant()] = $kv[1] }
+        }
+        $global:__VibexLsTable = $t; $global:__VibexLsKey = $env:LS_COLORS
+    }
+    $global:__VibexLsTable
+}
+
+# A name coloured the way GNU ls would.
+function global:__vx_lsname($item) {
+    $t = __vx_lscolors; $e = [char]27
+    $sgr = if ($item -is [System.IO.DirectoryInfo]) { $t['di'] }
+    elseif ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { $t['ln'] }
+    else { $x = [IO.Path]::GetExtension($item.Name).ToLowerInvariant(); if ($x) { $t["*$x"] } }
+    if ($item.Attributes -band [IO.FileAttributes]::Hidden -and -not $sgr) { $sgr = '90' }
+    if ($sgr) { "$e[${sgr}m$($item.Name)$e[0m" } else { $item.Name }
+}
+
+# 3.3K, 12M: sizes the way `ls -lh` shows them.
+function global:__vx_human([long]$n) {
+    if ($n -lt 1024) { return "$n" }
+    $u = 'K', 'M', 'G', 'T', 'P'; $v = [double]$n; $i = -1
+    while ($v -ge 1024 -and $i -lt 4) { $v /= 1024; $i++ }
+    if ($v -lt 10) { '{0:0.0}{1}' -f $v, $u[$i] } else { '{0:0}{1}' -f $v, $u[$i] }
+}
+
+# Plain `ls` at the prompt: PowerShell's listing, in colour (mode letters,
+# date, size, names by type). Anything that isn't a file or folder (ls env:,
+# ls -Name) goes out untouched.
+function global:__vx_lspaint {
+    $all = @($input)
+    if (-not $all.Count) { return }
+    if (@($all | Where-Object { $_ -isnot [System.IO.FileSystemInfo] }).Count) { return $all }
+    $e = [char]27; $r = "$e[0m"
+    # (the archive bit is on nearly every file: quiet)
+    $mc = @{ 'd' = "$e[1;34m"; 'a' = "$e[90m"; 'r' = "$e[33m"; 'h' = "$e[35m"; 's' = "$e[1;31m"; 'l' = "$e[36m" }
+    $year = (Get-Date).Year
+    $groups = $all | Group-Object { if ($_ -is [System.IO.DirectoryInfo]) { $_.Parent.FullName } else { $_.DirectoryName } }
+    foreach ($g in $groups) {
+        ''
+        "    $e[90mDirectory:$r $e[1m$($g.Name)$r"
+        ''
+        "$e[90mMode   Last write    Size  Name$r"
+        foreach ($i in $g.Group) {
+            $mode = -join ($i.Mode.ToCharArray() | ForEach-Object { $c = [string]$_; if ($mc.ContainsKey($c)) { $mc[$c] + $c + $r } else { "$e[90m-$r" } })
+            $t = $i.LastWriteTime
+            $when = if ($t.Year -eq $year) { $t.ToString('MMM dd HH:mm', [Globalization.CultureInfo]::InvariantCulture) } else { $t.ToString('MMM dd  yyyy', [Globalization.CultureInfo]::InvariantCulture) }
+            $size = if ($i -is [System.IO.DirectoryInfo]) { "$e[90m{0,5}$r" -f '-' } else { "$e[32m{0,5}$r" -f (__vx_human $i.Length) }
+            "$mode $e[36m$when$r $size  $(__vx_lsname $i)"
+        }
+    }
+    ''
+}
+
+# `ls -l` (GNU) at the prompt: permissions, owner, size and date coloured
+# the way eza does, and Windows' unknown group number shown as the user.
+function global:__vx_lslong([switch]$Plain) {
+    begin {
+        $e = [char]27; $r = "$e[0m"
+        $pc = @{ 'r' = "$e[33m"; 'w' = "$e[31m"; 'x' = "$e[1;32m"; 's' = "$e[35m"; 't' = "$e[35m"; '-' = "$e[90m" }   # (keys ignore case: S, T too)
+        $tc = @{ 'd' = "$e[1;34m"; 'l' = "$e[1;36m"; '-' = "$e[90m"; 'c' = "$e[33m"; 'b' = "$e[33m"; 'p' = "$e[35m"; 's' = "$e[35m" }
+        $re = [regex]'^([-dlcbpsD])([-rwxsStT]{9})([.+@]?)( +\d+ +)(\S+)( +)(\S+)( +)([\d.,]+[KMGTPE]?)( +)(\S+ +\d+ +[\d:]+)(.*)$'
+        $me = $env:USERNAME
+    }
+    process {
+        $l = [string]$_
+        if ($l -match '^total ') { if ($Plain) { $l } else { "$e[90m$l$r" }; return }
+        $m = $re.Match($l)
+        if (-not $m.Success) {
+            # other layouts (-o, -g, long-iso dates): just the permissions
+            if (-not $Plain -and $l -match '^([-dlcbpsD])([-rwxsStT]{9})(.*)$') {
+                $tc[$matches[1]] + $matches[1] + $r + (-join ($matches[2].ToCharArray() | ForEach-Object { $pc[[string]$_] + $_ + $r })) + $matches[3]
+            } else { $l }
+            return
+        }
+        $g = $m.Groups
+        if ($Plain) {
+            # Kali's look (Dragon): only the group fixed
+            $group = $g[7].Value
+            if ($group -match '^\d{5,}$' -and $g[5].Value -notmatch '^\d+$') { return $l.Substring(0, $g[7].Index) + $g[5].Value.PadRight($group.Length) + $l.Substring($g[7].Index + $group.Length) }
+            return $l
+        }
+        $perm = -join ($g[2].Value.ToCharArray() | ForEach-Object { $pc[[string]$_] + $_ + $r })
+        $owner = $g[5].Value; $group = $g[7].Value
+        if ($group -match '^\d{5,}$' -and $owner -notmatch '^\d+$') { $group = $owner.PadRight($group.Length) }
+        $oc = if ($owner -eq $me) { "$e[1;33m" } else { "$e[33m" }
+        $sz = $g[9].Value
+        $sc = if ($sz -eq '0') { "$e[90m" } else { "$e[32m" }
+        "$($tc[$g[1].Value])$($g[1].Value)$r$perm$($g[3].Value)$e[90m$($g[4].Value)$r$oc$owner$r$($g[6].Value)$e[33m$group$r$($g[8].Value)$sc$sz$r$($g[10].Value)$e[36m$($g[11].Value)$r$($g[12].Value)"
+    }
+}
+
+# GNU ls for a typed command: long listings through the colourer.
+function global:__vx_gnuls([string]$gnu, [object[]]$m, [bool]$atHost) {
+    $long = @($m | Where-Object { $_ -is [string] -and $_ -cmatch '^-[^-]*l' }).Count -or ($m -contains '--format=long') -or ($m -contains '--format=verbose')
+    if ($atHost -and $long -and -not ($m -match '^--colou?r')) { & $gnu --color=always @m | __vx_lslong -Plain:($env:VIBEX_PROMPT -eq 'dragon') }
+    else { & $gnu --color=auto @m }
+}
+
 function global:ls {
     begin {
         $sp = $null; $mode = 'ps'
@@ -367,12 +484,16 @@ function global:ls {
         # the output goes somewhere (`$x = ls`, `ls | ...`, `(ls).Count`)
         elseif ($gnu -and $env:VIBEX_PROMPT -eq 'dragon' -and -not $MyInvocation.ExpectingInput -and -not $onlyR -and
             -not @($args | Where-Object { $_ -isnot [string] -or $_ -match '^-[A-Za-z]{2,}' }).Count -and (__vx_ctx $MyInvocation).Host) { $mode = 'gnu' }
+        # typed at the prompt, nothing piped or redirected: in colour
+        $atHost = -not $MyInvocation.ExpectingInput -and (__vx_ctx $MyInvocation).Host
+        if ($mode -eq 'ps' -and $atHost -and -not $onlyR) { $mode = 'paint' }
         if ($mode -eq 'ps') { $vxa = $args; $sp = { & 'Microsoft.PowerShell.Management\Get-ChildItem' @vxa }.GetSteppablePipeline($MyInvocation.CommandOrigin); $sp.Begin($MyInvocation.ExpectingInput) }
     }
     process { if ($sp -and $MyInvocation.ExpectingInput) { $sp.Process($_) } }
     end {
         if ($sp) { $sp.End(); __vx_export_vars $args; return }
-        if ($mode -eq 'gnu') { $m = __vx_msys 'ls' $args; & $gnu --color=auto @m; __vx_native_done $MyInvocation; return }
+        if ($mode -eq 'paint') { $vxa = $args; & 'Microsoft.PowerShell.Management\Get-ChildItem' @vxa | __vx_lspaint; return }
+        if ($mode -eq 'gnu') { $m = __vx_msys 'ls' $args; __vx_gnuls $gnu $m $atHost; __vx_native_done $MyInvocation; return }
         # no Git: -a/-A show hidden, -R recurses, -d lists folders themselves
         $f = __vx_flags $args
         $p = @{}
@@ -399,17 +520,27 @@ if ($env:VIBEX_PROMPT -eq 'dragon' -and -not $env:LS_COLORS) {
     }
     foreach ($__vxv in '__vxdc', '__vxdb', '__vxlec', '__vxv') { $ExecutionContext.SessionState.PSVariable.Remove($__vxv) }
 }
-function global:ll { $gnu = __vx_gnu ls; if ($gnu) { $m = __vx_msys 'ls' $args; & $gnu -lh --color=auto @m } else { Get-ChildItem -Force @args } }
-function global:la { $gnu = __vx_gnu ls; if ($gnu) { $m = __vx_msys 'ls' $args; & $gnu -lAh --color=auto @m } else { Get-ChildItem -Force @args } }
+function global:ll { $gnu = __vx_gnu ls; if ($gnu) { $m = @('-lh') + @(__vx_msys 'ls' $args); __vx_gnuls $gnu $m ((__vx_ctx $MyInvocation).Host) } else { Get-ChildItem -Force @args } }
+function global:la { $gnu = __vx_gnu ls; if ($gnu) { $m = @('-lAh') + @(__vx_msys 'ls' $args); __vx_gnuls $gnu $m ((__vx_ctx $MyInvocation).Host) } else { Get-ChildItem -Force @args } }
 
 # cmd's switches (/s, /q ...) present?
 function global:__vx_cmdswitch([object[]]$argv) { @($argv | Where-Object { $_ -is [string] -and $_ -match '^/[A-Za-z?-]' }).Count -gt 0 }
 
 # dir /s /b (cmd's) or dir (PowerShell's)
 function global:dir {
-    begin { $sp = $null; if (-not (__vx_cmdswitch $args)) { $vxa = $args; $sp = { & 'Microsoft.PowerShell.Management\Get-ChildItem' @vxa }.GetSteppablePipeline($MyInvocation.CommandOrigin); $sp.Begin($MyInvocation.ExpectingInput) } }
+    begin {
+        $sp = $null; $paint = $false
+        if (-not (__vx_cmdswitch $args)) {
+            # typed at the prompt: the coloured listing, as ls has
+            $paint = -not $MyInvocation.ExpectingInput -and (__vx_ctx $MyInvocation).Host
+            if (-not $paint) { $vxa = $args; $sp = { & 'Microsoft.PowerShell.Management\Get-ChildItem' @vxa }.GetSteppablePipeline($MyInvocation.CommandOrigin); $sp.Begin($MyInvocation.ExpectingInput) }
+        }
+    }
     process { if ($sp -and $MyInvocation.ExpectingInput) { $sp.Process($_) } }
-    end { if ($sp) { $sp.End(); __vx_export_vars $args } else { & $env:ComSpec /d /c dir @args } }
+    end {
+        if ($paint) { $vxa = $args; & 'Microsoft.PowerShell.Management\Get-ChildItem' @vxa | __vx_lspaint }
+        elseif ($sp) { $sp.End(); __vx_export_vars $args } else { & $env:ComSpec /d /c dir @args }
+    }
 }
 
 function global:cat {

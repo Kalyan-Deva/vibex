@@ -1,13 +1,9 @@
-//! VibeX Icons, "Circuit": Vibex's own icons.
-//!
-//! The look: a 24 × 24 grid and a 1.5 stroke like most line icons, but
-//! corners are cut at 45° instead of rounded, round things become hexagons
-//! and octagons, and every icon carries one cyan element (a node where a
-//! trace ends, or the stroke that matters), like a circuit board. At least
-//! 2 units of space to the edge, so the set reads as one family. Icons are written as a small
-//! subset of SVG (`path`, `circle`, `rect`, and `dot` = a filled circle),
-//! which is also what `svg()` writes out, so the same source becomes an
-//! icon pack later.
+//! Vibex's icons: Lucide (https://lucide.dev, ISC licence, see
+//! THIRD_PARTY_NOTICES.md), the 24 × 24 line icons, drawn with a 1.5 stroke
+//! (Lucide's own is 2) so they sit as lightly as the UI text. Sources are a
+//! small subset of SVG (`path`, `circle`, `rect`, and `dot` = a filled
+//! circle; an `a-` prefix draws in the accent colour), converted from
+//! Lucide's SVG files; `svg()` writes them back out.
 //!
 //! Drawing: paths are flattened to line segments and each pixel's coverage
 //! comes from its distance to the nearest segment (anti-aliased, round caps
@@ -22,43 +18,41 @@ pub const STROKE: f32 = 1.5;
 
 /// (name, shapes). Shapes are separated by `;`, each `kind: args`.
 pub const ICONS: &[(&str, &str)] = &[
-    // pages
-    ("appearance", "path: M8.25 3.25 H15.75 L20.75 8.25 V15.75 L15.75 20.75 H8.25 L3.25 15.75 V8.25 Z; dot: 8.75 9.75 1.15; dot: 13.75 8.25 1.15; a-dot: 9.75 14.75 1.3; path: M14.25 15.75 L16.5 13.5"),
-    ("terminal", "path: M5.5 4.5 H18.5 L20.5 6.5 V17.5 L18.5 19.5 H5.5 L3.5 17.5 V6.5 Z; path: M7.25 9.25 L10 12 L7.25 14.75; a-path: M12.75 14.75 H15.25; a-dot: 16.75 14.75 1.15"),
-    ("security", "path: M12 3.25 L19.25 5.75 V12 L12 20.75 L4.75 12 V5.75 Z; a-path: M8.75 12 L11 14.25 L14.25 11; a-dot: 15.4 9.85 1.15"),
-    ("profile", "path: M10.5 4.25 H13.5 L15.5 6.25 V9.25 L13.5 11.25 H10.5 L8.5 9.25 V6.25 Z; path: M5.25 20 V17.25 L8 14.5 H16 L18.75 17.25 V20; a-dot: 12 17.5 1.15"),
-    ("keyboard", "path: M4.75 6 H19.25 L21.25 8 V16 L19.25 18 H4.75 L2.75 16 V8 Z; dot: 7 10 .95; dot: 10.33 10 .95; dot: 13.67 10 .95; a-dot: 17 10 1.1; path: M8 14.25 h8"),
-    ("download", "path: M12 3.75 v9.25; a-path: M8.5 9.75 L12 13.25 L15.5 9.75; path: M4.25 15.25 V18 L6.25 20 H17.75 L19.75 18 V15.25"),
-    ("info", "path: M8.25 3.25 H15.75 L20.75 8.25 V15.75 L15.75 20.75 H8.25 L3.25 15.75 V8.25 Z; path: M12 11 v5.25; a-dot: 12 7.9 1.15"),
-    ("sliders", "path: M3.5 7.5 H9.75; path: M11 5.5 H15 L16.25 7.5 L15 9.5 H11 L9.75 7.5 Z; a-path: M16.25 7.5 H20.5; path: M3.5 16.5 H5.75; path: M7 14.5 H11 L12.25 16.5 L11 18.5 H7 L5.75 16.5 Z; a-path: M12.25 16.5 H20.5"),
-    // actions
-    ("plus", "path: M12 5.5 v13; path: M5.5 12 h13"),
-    ("close", "path: M6.75 6.75 l10.5 10.5; path: M17.25 6.75 l-10.5 10.5"),
-    ("chevron-down", "path: M7 10 l5 5 5-5"),
-    ("check", "path: M5.5 12.5 l4 4 9-9"),
-    ("copy", "path: M10.25 8.25 H18.75 L20.75 10.25 V18.75 L18.75 20.75 H10.25 L8.25 18.75 V10.25 Z; path: M15.75 8.25 V5.25 L13.75 3.25 H5.25 L3.25 5.25 V13.75 L5.25 15.75 H8.25; a-dot: 14.5 14.5 1.15"),
-    ("paste", "path: M7.25 4.75 H16.75 L19.25 7.25 V18.75 L16.75 21.25 H7.25 L4.75 18.75 V7.25 Z; path: M9.25 3 H14.75 V6.25 H9.25 Z; path: M8.75 12 h6.5; a-path: M8.75 15.75 h4"),
-    ("split-right", "path: M5.5 4.5 H18.5 L20.5 6.5 V17.5 L18.5 19.5 H5.5 L3.5 17.5 V6.5 Z; a-path: M12 4.5 V10.25; a-path: M12 13.75 V19.5; a-dot: 12 12 1.25"),
-    ("split-down", "path: M5.5 4.5 H18.5 L20.5 6.5 V17.5 L18.5 19.5 H5.5 L3.5 17.5 V6.5 Z; a-path: M3.5 12 H10.25; a-path: M13.75 12 H20.5; a-dot: 12 12 1.25"),
-    ("search", "path: M8 4.25 H13 L16.25 7.5 V12.5 L13 15.75 H8 L4.75 12.5 V7.5 Z; path: M15.25 14.75 L18.75 18.25; a-path: M7.75 10 H13.25; a-dot: 19.6 19.1 1.2"),
-    ("float", "path: M5.5 4.5 H18.5 L20.5 6.5 V17.5 L18.5 19.5 H5.5 L3.5 17.5 V6.5 Z; a-path: M12.25 10.75 H16.5 L17.75 12 V14.75 L16.5 16 H12.25 L11 14.75 V12 Z"),
-    ("history", "path: M9.5 3.75 H14.5 L20.25 9.5 V14.5 L14.5 20.25 H9.5 L3.75 14.5 V9.5 Z; path: M12 7.75 V12 L14.75 13.75; a-dot: 12 12 1.1"),
-    ("record", "path: M8.25 3.25 H15.75 L20.75 8.25 V15.75 L15.75 20.75 H8.25 L3.25 15.75 V8.25 Z; a-dot: 12 12 3.5"),
-    ("note", "path: M6.25 3.25 H14.75 L19.75 8.25 V18.75 L17.75 20.75 H6.25 L4.25 18.75 V5.25 Z; path: M14.75 3.25 V8.25 H19.75; path: M8.25 12.75 h7.5; a-path: M8.25 16.25 h4.5"),
-    ("command", "path: M6 3.25 H18 L20.75 6 V18 L18 20.75 H6 L3.25 18 V6 Z; path: M7.5 8.5 h9; path: M7.5 12 h5.5; a-path: M7.5 15.5 h4.5; a-dot: 15.25 15.5 1.1"),
-    ("folder", "path: M3.25 6.75 L5.25 4.75 H9.75 L12 7 H18.75 L20.75 9 V17.25 L18.75 19.25 H5.25 L3.25 17.25 Z; a-path: M7 15.25 H11"),
-    ("file", "path: M7 3.25 H13.75 L19 8.5 V18.75 L17 20.75 H7 L5 18.75 V5.25 Z; a-path: M13.75 3.25 V8.5 H19"),
-    ("link", "path: M10.5 8 H6.25 L3.25 11 V13 L6.25 16 H10.5; path: M13.5 8 H17.75 L20.75 11 V13 L17.75 16 H13.5; a-path: M8.5 12 H15.5"),
-    ("key", "path: M5.75 11.5 H8.75 L10.75 13.5 V16.5 L8.75 18.5 H5.75 L3.75 16.5 V13.5 Z; path: M10.75 13.5 L19.25 5; path: M16.5 7.75 L18.75 10; path: M14.25 10 L16 11.75; a-dot: 7.25 15 1.1"),
-    ("server", "path: M5.25 4 H18.75 L20.75 6 V9 L18.75 11 H5.25 L3.25 9 V6 Z; path: M5.25 13 H18.75 L20.75 15 V18 L18.75 20 H5.25 L3.25 18 V15 Z; a-dot: 7 7.5 1.1; dot: 7 16.5 1; path: M11 7.5 h5.75; path: M11 16.5 h5.75"),
-    ("warning", "path: M10.75 4.25 H13.25 L20.75 17.75 L19.5 19.75 H4.5 L3.25 17.75 Z; path: M12 9.5 v4.25; a-dot: 12 16.5 1.15"),
-    ("tab-new", "path: M5.5 4.5 H18.5 L20.5 6.5 V17.5 L18.5 19.5 H5.5 L3.5 17.5 V6.5 Z; a-path: M12 8.75 v6.5; a-path: M8.75 12 h6.5"),
-    ("scan", "path: M4 8.5 V6 L6 4 H8.5; path: M15.5 4 H18 L20 6 V8.5; path: M20 15.5 V18 L18 20 H15.5; path: M8.5 20 H6 L4 18 V15.5; a-path: M10.75 9 H13.25 L15 10.75 V13.25 L13.25 15 H10.75 L9 13.25 V10.75 Z"),
-    ("target", "path: M8.25 3.25 H15.75 L20.75 8.25 V15.75 L15.75 20.75 H8.25 L3.25 15.75 V8.25 Z; path: M10.25 7.5 H13.75 L16.5 10.25 V13.75 L13.75 16.5 H10.25 L7.5 13.75 V10.25 Z; a-dot: 12 12 1.3"),
-    ("trash", "path: M4 6.75 h16; path: M9.25 6.75 V4.75 L10.25 3.75 H13.75 L14.75 4.75 V6.75; path: M6 6.75 L7 19 L8.5 20.5 H15.5 L17 19 L18 6.75; a-path: M10 11 v5.5; path: M14 11 v5.5"),
-    ("play", "path: M8 5.25 L9.25 4.5 L19 11.25 V12.75 L9.25 19.5 L8 18.75 Z; a-dot: 11.75 12 1.15"),
-    ("eye", "path: M2.75 12 L7 7.25 H17 L21.25 12 L17 16.75 H7 Z; a-path: M10.25 9.25 H13.75 L15.25 12 L13.75 14.75 H10.25 L8.75 12 Z; dot: 12 12 1"),
-    ("focus", "path: M4 9 V6 L6 4 H9; path: M15 4 H18 L20 6 V9; path: M20 15 V18 L18 20 H15; path: M9 20 H6 L4 18 V15; a-dot: 12 12 1.3"),
+    ("appearance", "path: M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z; circle: 13.5 6.5 0.5; circle: 17.5 10.5 0.5; circle: 6.5 12.5 0.5; circle: 8.5 7.5 0.5"),  // lucide: palette
+    ("terminal", "path: m7 11 2-2-2-2; path: M11 13h4; rect: 3 3 18 18 2"),  // lucide: square-terminal
+    ("security", "path: M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z; path: m9 12 2 2 4-4"),  // lucide: shield-check
+    ("profile", "path: M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2; circle: 12 7 4"),  // lucide: user
+    ("keyboard", "path: M10 8h.01; path: M12 12h.01; path: M14 8h.01; path: M16 12h.01; path: M18 8h.01; path: M6 8h.01; path: M7 16h10; path: M8 12h.01; rect: 2 4 20 16 2"),  // lucide: keyboard
+    ("download", "path: M12 15V3; path: M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4; path: m7 10 5 5 5-5"),  // lucide: download
+    ("info", "circle: 12 12 10; path: M12 16v-4; path: M12 8h.01"),  // lucide: info
+    ("sliders", "path: M10 5H3; path: M12 19H3; path: M14 3v4; path: M16 17v4; path: M21 12h-9; path: M21 19h-5; path: M21 5h-7; path: M8 10v4; path: M8 12H3"),  // lucide: sliders-horizontal
+    ("plus", "path: M5 12h14; path: M12 5v14"),  // lucide: plus
+    ("close", "path: M18 6 6 18; path: m6 6 12 12"),  // lucide: x
+    ("chevron-down", "path: m6 9 6 6 6-6"),  // lucide: chevron-down
+    ("check", "path: M20 6 9 17l-5-5"),  // lucide: check
+    ("copy", "rect: 8 8 14 14 2; path: M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"),  // lucide: copy
+    ("paste", "path: M11 14h10; path: M16 4h2a2 2 0 0 1 2 2v1.344; path: m17 18 4-4-4-4; path: M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 1.793-1.113; rect: 8 2 8 4 1"),  // lucide: clipboard-paste
+    ("split-right", "rect: 3 3 18 18 2; path: M12 3v18"),  // lucide: columns-2
+    ("split-down", "rect: 3 3 18 18 2; path: M3 12h18"),  // lucide: rows-2
+    ("search", "path: m21 21-4.34-4.34; circle: 11 11 8"),  // lucide: search
+    ("float", "path: M21 9V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10c0 1.1.9 2 2 2h4; rect: 12 13 10 7 2"),  // lucide: picture-in-picture-2
+    ("history", "path: M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8; path: M3 3v5h5; path: M12 7v5l4 2"),  // lucide: rotate-ccw-clock
+    ("record", "circle: 12 12 1; circle: 12 12 10"),  // lucide: circle-dot
+    ("note", "path: M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4; path: M2 6h4; path: M2 10h4; path: M2 14h4; path: M2 18h4; path: M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z"),  // lucide: notebook-pen
+    ("command", "path: M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"),  // lucide: command
+    ("folder", "path: M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"),  // lucide: folder
+    ("file", "path: M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z; path: M14 2v5a1 1 0 0 0 1 1h5"),  // lucide: file
+    ("link", "path: M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71; path: M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"),  // lucide: link
+    ("key", "path: M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z; circle: 16.5 7.5 0.5"),  // lucide: key-round
+    ("server", "rect: 2 2 20 8 2; rect: 2 14 20 8 2; path: M6 6 L6.01 6; path: M6 18 L6.01 18"),  // lucide: server
+    ("warning", "path: m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3; path: M12 9v4; path: M12 17h.01"),  // lucide: triangle-exclamation-point
+    ("tab-new", "rect: 3 3 18 18 2; path: M8 12h8; path: M12 8v8"),  // lucide: square-plus
+    ("scan", "path: M3 7V5a2 2 0 0 1 2-2h2; path: M17 3h2a2 2 0 0 1 2 2v2; path: M21 17v2a2 2 0 0 1-2 2h-2; path: M7 21H5a2 2 0 0 1-2-2v-2"),  // lucide: scan
+    ("target", "circle: 12 12 10; path: M22 12 L18 12; path: M6 12 L2 12; path: M12 6 L12 2; path: M12 22 L12 18"),  // lucide: crosshair
+    ("trash", "path: M10 11v6; path: M14 11v6; path: M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6; path: M3 6h18; path: M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"),  // lucide: trash
+    ("play", "path: M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"),  // lucide: play
+    ("eye", "path: M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0; circle: 12 12 3"),  // lucide: eye
+    ("focus", "circle: 12 12 3; path: M3 7V5a2 2 0 0 1 2-2h2; path: M17 3h2a2 2 0 0 1 2 2v2; path: M21 17v2a2 2 0 0 1-2 2h-2; path: M7 21H5a2 2 0 0 1-2-2v-2"),  // lucide: focus
 ];
 
 // ------------------------------------------------------------ geometry
